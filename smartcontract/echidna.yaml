@@ -1,0 +1,38 @@
+# Echidna configuration for BinRatchet
+#
+# Local (no fork, pure bin-math properties):
+#   echidna . --contract BinRatchetMathFuzz --config echidna.yaml
+#
+# Forked mainnet (invariants against real Uniswap v4 pools):
+#   echidna . --contract BinRatchetForkFuzz --config echidna.yaml \
+#       --fork-url https://eth-mainnet.example.com/v2/YOUR_KEY --fork-block 25600000
+#   (or uncomment forkUrl/forkBlock below)
+
+# Compile the foundry project (src + test + script) before running.
+cryticArgs:
+  - "--foundry-compile-all"
+
+# Property tests: every `echidna_test_*` function must return true.
+testMode: property
+
+# Prefix for property test functions.
+prefix: echidna_test_
+
+# Total number of calls to execute.
+testLimit: 50000
+
+# Maximum length of a transaction sequence between two property checks.
+seqLen: 100
+
+# Maximum shrink steps when a failing sequence is found.
+shrinkLimit: 5000
+
+# Number of parallel fuzzing threads.
+workers: 4
+
+# Fork configuration (used only when running the fork fuzz contract).
+# forkUrl: https://eth-mainnet.example.com/v2/YOUR_KEY
+# forkBlock: 25600000
+
+# Corpus directory for interesting sequences (recommended to keep between runs).
+# corpusDir: .echidna/corpus
