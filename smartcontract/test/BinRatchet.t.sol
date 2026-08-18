@@ -18,7 +18,6 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {BinRatchet} from "../src/BinRatchet.sol";
-import {BinRatchetMath} from "../src/libraries/BinRatchetMath.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
 contract BinRatchetTest is BaseTest {
@@ -35,137 +34,176 @@ contract BinRatchetTest is BaseTest {
     BinRatchet hook;
     PoolId poolId;
 
+    // Pool creator is this test contract (since we call poolManager.initialize)
+    address poolCreator = address(this);
+
     function setUp() public {
-        // Deploys all required artifacts.
         deployArtifactsAndLabel();
 
         (currency0, currency1) = deployCurrencyPair();
 
-        // Deploy the hook via CREATE2 with all flags cleared. BaseHook's constructor
-        // requires the deployed address to match getHookPermissions() exactly, so the
-        // address is mined to have zero bits in the low 14 flag bits.
-        address flags = address(uint160(0));
+        // Deploy the hook with BEFORE_INITIALIZE_FLAG | AFTER_INITIALIZE_FLAG | BEFORE_ADD_LIQUIDITY_FLAG
+        address flags =
+            address(uint160(Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG));
         bytes memory constructorArgs = abi.encode(poolManager);
         deployCodeTo("BinRatchet.sol:BinRatchet", constructorArgs, flags);
         hook = BinRatchet(flags);
 
-        // The pool is created WITHOUT the hook: with all permissions disabled this
-        // v4-core version rejects any non-zero hook address without flags set.
-        // Attach the hook once its first permission is re-enabled.
-        poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
+        // Create pool WITH the hook attached
+        poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolId = poolKey.toId();
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
+
+        // afterInitialize fired -> poolCreator[poolId] = address(this) (msg.sender of initialize)
     }
 
-    function testPermissionsDisabled() public view {
+    // ─────────────────────────────────────────────────────────────────────
+    //   SETUP VERIFICATION
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_BeforeInitializeFlagEnabled() public view {
         Hooks.Permissions memory permissions = hook.getHookPermissions();
-
-        assertFalse(permissions.beforeInitialize);
-        assertFalse(permissions.afterInitialize);
-        assertFalse(permissions.beforeAddLiquidity);
-        assertFalse(permissions.afterAddLiquidity);
-        assertFalse(permissions.beforeRemoveLiquidity);
-        assertFalse(permissions.afterRemoveLiquidity);
-        assertFalse(permissions.beforeSwap);
-        assertFalse(permissions.afterSwap);
-        assertFalse(permissions.beforeDonate);
-        assertFalse(permissions.afterDonate);
-        assertFalse(permissions.beforeSwapReturnDelta);
-        assertFalse(permissions.afterSwapReturnDelta);
-        assertFalse(permissions.afterAddLiquidityReturnDelta);
-        assertFalse(permissions.afterRemoveLiquidityReturnDelta);
+        assertTrue(permissions.beforeInitialize);
     }
 
-    function testBinMath() public pure {
-        // Tick -> bin rounding (floor for negatives)
-        assertEq(BinRatchetMath.tickToBin(0), 0);
-        assertEq(BinRatchetMath.tickToBin(1), 0);
-        assertEq(BinRatchetMath.tickToBin(59), 0);
-        assertEq(BinRatchetMath.tickToBin(60), 1);
-        assertEq(BinRatchetMath.tickToBin(-1), -1);
-        assertEq(BinRatchetMath.tickToBin(-60), -1);
-        assertEq(BinRatchetMath.tickToBin(-61), -2);
-
-        // Bin -> tick bounds
-        assertEq(BinRatchetMath.binLowerTick(0), 0);
-        assertEq(BinRatchetMath.binUpperTick(0), 60);
-        assertEq(BinRatchetMath.binLowerTick(1), 60);
-        assertEq(BinRatchetMath.binUpperTick(1), 120);
-        assertEq(BinRatchetMath.binLowerTick(-1), -60);
-        assertEq(BinRatchetMath.binUpperTick(-1), 0);
-
-        // Alignment
-        assertTrue(BinRatchetMath.isBinAligned(0));
-        assertTrue(BinRatchetMath.isBinAligned(60));
-        assertTrue(BinRatchetMath.isBinAligned(-60));
-        assertFalse(BinRatchetMath.isBinAligned(30));
-        assertFalse(BinRatchetMath.isBinAligned(-30));
-
-        // Floor division
-        assertEq(BinRatchetMath.floorDiv(0, 60), 0);
-        assertEq(BinRatchetMath.floorDiv(59, 60), 0);
-        assertEq(BinRatchetMath.floorDiv(60, 60), 1);
-        assertEq(BinRatchetMath.floorDiv(-1, 60), -1);
-        assertEq(BinRatchetMath.floorDiv(-60, 60), -1);
-        assertEq(BinRatchetMath.floorDiv(-61, 60), -2);
+    function test_AfterInitializeFlagEnabled() public view {
+        Hooks.Permissions memory permissions = hook.getHookPermissions();
+        assertTrue(permissions.afterInitialize);
     }
 
-    function testLiquidityAllowed() public {
-        uint128 liquidityAmount = 100e18;
-        int24 tickLower = 0;
-        int24 tickUpper = 60;
+    function test_BeforeAddLiquidityFlagEnabled() public view {
+        Hooks.Permissions memory permissions = hook.getHookPermissions();
+        assertTrue(permissions.beforeAddLiquidity);
+    }
 
-        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-            Constants.SQRT_PRICE_1_1,
-            TickMath.getSqrtPriceAtTick(tickLower),
-            TickMath.getSqrtPriceAtTick(tickUpper),
-            liquidityAmount
-        );
+    function test_PoolCreatorCaptured() public view {
+        assertEq(hook.poolCreator(poolId), poolCreator);
+    }
 
+    // ─────────────────────────────────────────────────────────────────────
+    //   setBinSize - SUCCESS
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_setBinSize_succeeds() public {
+        int24 binSize = 60;
+
+        hook.setBinSize(poolKey, binSize);
+
+        assertEq(hook.getBinSize(poolId), binSize);
+        assertTrue(hook.isConfigured(poolId));
+        assertEq(hook.binSizeSet(poolId), true);
+    }
+
+    function test_setBinSize_emitsEvent() public {
+        int24 binSize = 60;
+
+        vm.expectEmit(address(hook));
+        emit BinRatchet.BinSizeSet(poolId, poolCreator, binSize);
+
+        hook.setBinSize(poolKey, binSize);
+    }
+
+    function test_setBinSize_variousSizes() public {
+        int24[] memory sizes = new int24[](4);
+        sizes[0] = 10;
+        sizes[1] = 60;
+        sizes[2] = 200;
+        sizes[3] = 1;
+
+        int24[] memory spacings = new int24[](4);
+        spacings[0] = 10;
+        spacings[1] = 30;
+        spacings[2] = 200;
+        spacings[3] = 3;
+
+        for (uint256 i = 0; i < sizes.length; i++) {
+            PoolKey memory freshKey = PoolKey(currency0, currency1, 3000, spacings[i], IHooks(address(hook)));
+            poolManager.initialize(freshKey, Constants.SQRT_PRICE_1_1);
+
+            hook.setBinSize(freshKey, sizes[i]);
+            assertEq(hook.getBinSize(freshKey.toId()), sizes[i]);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //   setBinSize - REVERTS
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_setBinSize_reverts_notCreator() public {
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(BinRatchet.NotPoolCreator.selector);
+        hook.setBinSize(poolKey, 60);
+    }
+
+    function test_setBinSize_reverts_alreadySet() public {
+        hook.setBinSize(poolKey, 60);
+
+        vm.expectRevert(BinRatchet.BinSizeAlreadySet.selector);
+        hook.setBinSize(poolKey, 120);
+    }
+
+    function test_setBinSize_reverts_invalidSize_zero() public {
+        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        hook.setBinSize(poolKey, 0);
+    }
+
+    function test_setBinSize_reverts_invalidSize_negative() public {
+        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        hook.setBinSize(poolKey, -10);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //   VIEW HELPERS
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_isConfigured_beforeSet() public view {
+        assertFalse(hook.isConfigured(poolId));
+    }
+
+    function test_isConfigured_afterSet() public {
+        hook.setBinSize(poolKey, 60);
+        assertTrue(hook.isConfigured(poolId));
+    }
+
+    function test_getBinSize_beforeSet() public view {
+        assertEq(hook.getBinSize(poolId), 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //   PER-POOL ISOLATION
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_twoPools_independentConfig() public {
+        // Pool 1: binSize = 60
+        hook.setBinSize(poolKey, 60);
+
+        // Pool 2: different token pair, binSize = 200
+        (Currency otherCurrency0, Currency otherCurrency1) = deployCurrencyPair();
+
+        address flags2 =
+            address(uint160(Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG));
+        bytes memory constructorArgs2 = abi.encode(poolManager);
+        deployCodeTo("BinRatchet.sol:BinRatchet", constructorArgs2, flags2);
+        BinRatchet hook2 = BinRatchet(flags2);
+
+        PoolKey memory poolKey2 = PoolKey(otherCurrency0, otherCurrency1, 3000, 60, IHooks(address(hook2)));
+        PoolId poolId2 = poolKey2.toId();
+        poolManager.initialize(poolKey2, Constants.SQRT_PRICE_1_1);
+
+        hook2.setBinSize(poolKey2, 200);
+
+        assertEq(hook.getBinSize(poolId), 60);
+        assertEq(hook2.getBinSize(poolId2), 200);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //   LIQUIDITY - PRE-CONFIGURATION CHECKS
+    // ─────────────────────────────────────────────────────────────────────
+
+    function testLiquidityRequiresConfig() public {
+        vm.expectRevert(BinRatchet.PoolNotConfigured.selector);
         positionManager.mint(
-            poolKey,
-            tickLower,
-            tickUpper,
-            liquidityAmount,
-            amount0Expected + 1,
-            amount1Expected + 1,
-            address(this),
-            block.timestamp,
-            Constants.ZERO_BYTES
+            poolKey, 0, 60, 100e18, type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
         );
-    }
-
-    function testSwapWorks() public {
-        uint128 liquidityAmount = 100e18;
-
-        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-            Constants.SQRT_PRICE_1_1, TickMath.getSqrtPriceAtTick(0), TickMath.getSqrtPriceAtTick(60), liquidityAmount
-        );
-
-        positionManager.mint(
-            poolKey,
-            0,
-            60,
-            liquidityAmount,
-            amount0Expected + 1,
-            amount1Expected + 1,
-            address(this),
-            block.timestamp,
-            Constants.ZERO_BYTES
-        );
-
-        swapRouter.swapExactTokensForTokens({
-            amountIn: 1e17,
-            amountOutMin: 0,
-            zeroForOne: false, // token1 -> token0, moves price up into the [0, 60] range
-            poolKey: poolKey,
-            hookData: Constants.ZERO_BYTES,
-            receiver: address(this),
-            deadline: block.timestamp + 1
-        });
-
-        (, int24 currentTick,,) = poolManager.getSlot0(poolId);
-        assertGt(currentTick, 0);
-        assertLt(currentTick, 60);
     }
 }

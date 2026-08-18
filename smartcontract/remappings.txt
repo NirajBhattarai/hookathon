@@ -7,6 +7,9 @@ v4-periphery/=lib/uniswap-hooks/lib/v4-periphery/
 
 @openzeppelin/uniswap-hooks/=lib/uniswap-hooks/
 @openzeppelin/contracts/=lib/uniswap-hooks/lib/v4-core/lib/openzeppelin-contracts/contracts/
+src/base/=lib/uniswap-hooks/src/base/
+src/utils/=lib/uniswap-hooks/src/utils/
+src/interfaces/=lib/uniswap-hooks/src/interfaces/
 
 hookmate/=lib/hookmate/src/
 permit2/=lib/uniswap-hooks/lib/v4-periphery/lib/permit2/

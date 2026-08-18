@@ -9,6 +9,9 @@ solc_version = "0.8.30"
 src = "src"
 via_ir = false
 
+[fuzz]
+runs = 10000
+
 [lint]
 exclude_lints = ["screaming-snake-case-immutable", "screaming-snake-case-const"]
 lint_on_build = false
