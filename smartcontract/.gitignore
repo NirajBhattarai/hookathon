@@ -20,3 +20,6 @@ crytic-export/
 
 # Node modules
 node_modules/
+
+# Metric OMM reference (parked for later; not part of the hook)
+research/metric-core/

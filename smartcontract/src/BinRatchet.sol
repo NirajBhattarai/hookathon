@@ -1,121 +1,72 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {BaseCustomCurve} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomCurve.sol";
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
+import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 
-/*//////////////////////////////////////////////////////////////
-                            BIN CONCEPT
-//////////////////////////////////////////////////////////////*/
-// Uniswap v4 prices live on a tick scale where each tick = 0.01% price change.
-// Instead of tracking every tick, we group ticks into larger buckets called BINS.
-//
-//   binSize = number of ticks per bin
-//
-//   binSize = 60   ->  each bin spans ~0.6% price   ->  tight bins for stable pairs
-//   binSize = 200  ->  each bin spans ~2.0% price   ->  wide bins for volatile pairs
-//   binSize = 10   ->  each bin spans ~0.1% price   ->  very fine for pegged assets
-//
-// Bins tile the tick number line symmetrically around 0:
-//
-//         ... | bin -2        | bin -1        | bin 0         | bin 1         | bin 2        | ...
-//   ticks: ... [-120, -60)    [-60, 0)        [0, 60)         [60, 120)       [120, 180)     ...
-//   price: ...  low  <---------------------------- center (1:1) --------------------------->  high
-//
-// The hook tracks which bin the pool price currently sits in (currentBin).
-// When a swap pushes price across a bin boundary, currentBin ratchets forward.
-// The ratchet is one-directional per swap direction - preventing sandwich attacks
-// from pulling price back to a previous bin.
-//
-// halfWidthBins controls how many bins away from center the price is allowed to move.
-// If price tries to go beyond +/-halfWidthBins, the swap reverts.
+import {BinMath} from "./libraries/BinMath.sol";
+import {LinearDecay} from "./libraries/LinearDecay.sol";
+import {LiquidityLibrary} from "./libraries/LiquidityLibrary.sol";
 
-/*//////////////////////////////////////////////////////////////
-                        TYPE DECLARATIONS
-//////////////////////////////////////////////////////////////*/
-
-/// @notice Per-pool bin configuration
-struct BinConfig {
-    /// @notice Number of ticks per bin
-    ///   60  = ~0.6% per bin  -> stable pairs
-    ///   200 = ~2.0% per bin  -> volatile pairs
-    int24 binSize; // ----------- 3 bytes
-    // TODO: fee formula parameters
-}
-
-/// @notice Per-pool runtime state
-struct BinState {
-    int24 currentBin; // --------- 3 bytes
-    BinConfig config; // --------- 3 bytes  (packed into 1 slot)
-}
-
-contract BinRatchet is BaseCustomAccounting {
+/// @title BinRatchet
+/// @notice Hook-owned bin book. Each bin is a mini x*y=k range. LinearDecay sizes L. Ratchet locks reverse.
+contract BinRatchet is BaseCustomCurve {
     using PoolIdLibrary for PoolKey;
+    using SafeCast for uint256;
 
-    /*//////////////////////////////////////////////////////////////
-                            STATE VARIABLES
-    //////////////////////////////////////////////////////////////*/
+    uint16 public constant DEFAULT_RAMP = 10;
+    uint16 public constant DEFAULT_BINS_PER_SIDE = 10;
+    /// @dev Temporary: allow same-block reverse so price can walk back. Re-enable for MEV lock.
+    bool public constant RATCHET_ENABLED = false;
 
-    /// @notice Per-pool bin state (current bin + config)
-    mapping(PoolId poolId => BinState) public binStates;
+    uint160 public constant HOOK_FLAGS = uint160(
+        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+            | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+    );
 
-    /// @notice Per-pool creator address (captured automatically at pool creation)
-    mapping(PoolId poolId => address creator) public poolCreator;
+    struct Book {
+        int24 binSize;
+        uint16 ramp;
+        uint16 numBinsPerSide;
+        int24 currentBin;
+        int24 minBin;
+        int24 maxBin;
+        uint160 sqrtPriceX96;
+        int24 ratchetLo;
+        int24 ratchetHi;
+        uint32 ratchetBlock;
+        bool configured;
+        bool seeded;
+    }
 
-    /// @notice Whether bin size has been set for a pool (immutable once set)
+    mapping(PoolId poolId => address) public poolCreator;
     mapping(PoolId poolId => bool) public binSizeSet;
-
-    /// @notice Total shares per pool
     mapping(PoolId poolId => uint256) public totalShares;
-
-    /// @notice Shares per user per pool
     mapping(PoolId poolId => mapping(address user => uint256)) public sharesOf;
+    mapping(int24 binIndex => uint128) public liquidity;
 
-    /*//////////////////////////////////////////////////////////////
-                                  EVENTS
-    //////////////////////////////////////////////////////////////*/
+    Book public book;
 
-    /// @notice Emitted when pool creator configures bin size
     event BinSizeSet(PoolId indexed poolId, address indexed creator, int24 binSize);
 
-    /*//////////////////////////////////////////////////////////////
-                                  ERRORS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Caller is not the pool creator
     error NotPoolCreator();
-
-    /// @notice Bin size has already been set for this pool
     error BinSizeAlreadySet();
-
-    /// @notice Invalid bin size (must be > 0)
     error InvalidBinSize();
-
-    /// @notice Pool has not been initialized with bin size yet
     error PoolNotConfigured();
+    error RemovalNotSupported();
+    error ExactOutputNotSupported();
+    error ZeroAmounts();
 
-    /// @notice Swap would exceed allowed bin range
-    error RangeNotAlignedToBins();
-
-    /*//////////////////////////////////////////////////////////////
-                               CONSTRUCTOR
-    //////////////////////////////////////////////////////////////*/
-
-    constructor(IPoolManager _poolManager) BaseCustomAccounting(_poolManager) {}
-
-    /*//////////////////////////////////////////////////////////////
-                           HOOK PERMISSIONS
-    //////////////////////////////////////////////////////////////*/
+    constructor(IPoolManager _poolManager) BaseCustomCurve(_poolManager) {}
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -123,217 +74,251 @@ contract BinRatchet is BaseCustomAccounting {
             afterInitialize: true,
             beforeAddLiquidity: true,
             afterAddLiquidity: false,
-            beforeRemoveLiquidity: false,
+            beforeRemoveLiquidity: true,
             afterRemoveLiquidity: false,
-            beforeSwap: false,
+            beforeSwap: true,
             afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
-            beforeSwapReturnDelta: false,
+            beforeSwapReturnDelta: true,
             afterSwapReturnDelta: false,
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
     }
 
-    /*//////////////////////////////////////////////////////////////
-                           HOOK CALLBACKS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Validates tick alignment before liquidity is added
-    function _beforeAddLiquidity(
-        address sender,
-        PoolKey calldata key,
-        ModifyLiquidityParams calldata params,
-        bytes calldata
-    ) internal override returns (bytes4) {
-        PoolId id = key.toId();
-        if (!binSizeSet[id]) revert PoolNotConfigured();
-
-        // Capture pool creator on first liquidity add (beforeInitialize is non-virtual)
-        if (poolCreator[id] == address(0)) {
-            poolCreator[id] = sender;
-        }
-
-        int24 binSize = binStates[id].config.binSize;
-        if (params.tickLower % binSize != 0 || params.tickUpper % binSize != 0) {
-            revert RangeNotAlignedToBins();
-        }
-
-        return IHooks.beforeAddLiquidity.selector;
-    }
-
-    /// @notice Captures the pool creator address during pool initialization
-    function _afterInitialize(address sender, PoolKey calldata key, uint160, int24)
+    function _afterInitialize(address sender, PoolKey calldata key, uint160 sqrtPriceX96, int24)
         internal
         override
         returns (bytes4)
     {
         PoolId id = key.toId();
         poolCreator[id] = sender;
-        return IHooks.afterInitialize.selector;
+        book.sqrtPriceX96 = sqrtPriceX96;
+        return this.afterInitialize.selector;
     }
 
-    /// @notice Per-bin liquidity distribution loop
-    /// @dev Overrides BaseCustomAccounting to distribute liquidity across individual bins
-    function unlockCallback(bytes calldata rawData)
-        external
-        override
-        onlyPoolManager
-        returns (bytes memory returnData)
-    {
-        // TODO: implement per-bin loop
-        // 1. Decode CallbackData
-        // 2. Get binSize from binStates
-        // 3. Calculate numBins = (tickUpper - tickLower) / binSize
-        // 4. Loop over bins:
-        //    a. TickMath.getSqrtPriceAtTick for bin boundaries
-        //    b. StateLibrary.getTickLiquidity for existing liquidity
-        //    c. Calculate proportional token share
-        //    d. LiquidityAmounts.getLiquidityForAmounts
-        //    e. Cap if existing + new > max
-        //    f. poolManager.modifyLiquidity per bin
-        //    g. Settle tokens
-        // 5. Return unused tokens
-
-        revert("not implemented");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                           ADD LIQUIDITY
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Adds liquidity to the pool with bin-aligned tick ranges
-    function addLiquidity(AddLiquidityParams calldata params) external payable override returns (BalanceDelta delta) {
-        PoolId id = poolKey.toId();
-        if (!binSizeSet[id]) revert PoolNotConfigured();
-        delta = BaseCustomAccounting(address(this)).addLiquidity(params);
-    }
-
-    /// @dev Snaps ticks to bin boundaries and returns modify params + shares
-    function _getAddLiquidity(uint160, AddLiquidityParams memory params)
-        internal
-        override
-        returns (bytes memory modify, uint256 shares)
-    {
-        PoolId id = poolKey.toId();
-        int24 binSize = binStates[id].config.binSize;
-
-        int24 tickLower = _snapToLowerBin(params.tickLower, binSize);
-        int24 tickUpper = _snapToUpperBin(params.tickUpper, binSize);
-
-        if (tickLower >= tickUpper) revert RangeNotAlignedToBins();
-
-        shares = uint256(uint128(params.amount0Desired)) + uint256(uint128(params.amount1Desired));
-
-        modify = abi.encode(
-            ModifyLiquidityParams({
-                tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: 0, salt: params.userInputSalt
-            })
-        );
-    }
-
-    /// @dev Required by BaseCustomAccounting but removal is not supported
-    function _getRemoveLiquidity(RemoveLiquidityParams memory) internal pure override returns (bytes memory, uint256) {
-        revert("removal not supported");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                          SHARE ACCOUNTING
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev Mints shares to the sender
-    function _mint(AddLiquidityParams memory params, BalanceDelta, BalanceDelta, uint256 shares) internal override {
-        PoolId id = poolKey.toId();
-        totalShares[id] += shares;
-        sharesOf[id][msg.sender] += shares;
-    }
-
-    /// @dev Burns shares from the sender (not used, removal blocked)
-    function _burn(RemoveLiquidityParams memory, BalanceDelta, BalanceDelta, uint256) internal pure override {
-        revert("removal not supported");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                            CONFIGURATION
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Set bin size for a pool (called once by pool creator after creation)
-    /// @param key The pool key
-    /// @param _binSize Number of ticks per bin (must be > 0)
     function setBinSize(PoolKey calldata key, int24 _binSize) external {
         PoolId id = key.toId();
-
         if (msg.sender != poolCreator[id]) revert NotPoolCreator();
         if (binSizeSet[id]) revert BinSizeAlreadySet();
-        if (_binSize <= 0) revert InvalidBinSize();
+        if (_binSize <= 0 || uint256(uint24(_binSize)) > 2_000) revert InvalidBinSize();
 
-        binStates[id].config.binSize = _binSize;
+        book.binSize = _binSize;
+        book.ramp = DEFAULT_RAMP;
+        book.numBinsPerSide = DEFAULT_BINS_PER_SIDE;
+        book.configured = true;
         binSizeSet[id] = true;
 
         emit BinSizeSet(id, msg.sender, _binSize);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                            VIEW HELPERS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Get bin size for a pool
-    /// @param poolId The pool ID
-    /// @return The bin size in ticks
-    function getBinSize(PoolId poolId) external view returns (int24) {
-        return binStates[poolId].config.binSize;
+    function getBinSize(PoolId) external view returns (int24) {
+        return book.binSize;
     }
 
-    /// @notice Check if pool has been configured with bin size
-    /// @param poolId The pool ID
-    /// @return True if bin size has been set
-    function isConfigured(PoolId poolId) external view returns (bool) {
-        return binSizeSet[poolId];
+    function isConfigured(PoolId) external view returns (bool) {
+        return book.configured;
     }
 
-    /// @notice Get total shares for a pool
-    /// @param poolId The pool ID
-    /// @return Total shares outstanding
-    function getTotalShares(PoolId poolId) external view returns (uint256) {
-        return totalShares[poolId];
+    function getTotalShares(PoolId) external view returns (uint256) {
+        return totalShares[poolKey.toId()];
     }
 
-    /// @notice Get shares for a specific user in a pool
-    /// @param poolId The pool ID
-    /// @param user The user address
-    /// @return Shares held by user
-    function getShares(PoolId poolId, address user) external view returns (uint256) {
-        return sharesOf[poolId][user];
+    function getShares(PoolId, address user) external view returns (uint256) {
+        return sharesOf[poolKey.toId()][user];
     }
 
-    /*//////////////////////////////////////////////////////////////
-                           INTERNAL HELPERS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Convert tick to bin index
-    /// @param tick The current tick
-    /// @param binSize Number of ticks per bin
-    /// @return The bin index
-    function _tickToBin(int24 tick, int24 binSize) internal pure returns (int24) {
-        return tick / binSize;
+    function currentSqrtPriceX96() external view returns (uint160) {
+        return book.sqrtPriceX96;
     }
 
-    /// @notice Snap a tick down to the lower boundary of its bin
-    function _snapToLowerBin(int24 tick, int24 binSize) internal pure returns (int24) {
-        if (tick >= 0) {
-            return (tick / binSize) * binSize;
-        } else {
-            return -(((-tick - 1) / binSize) * binSize + binSize);
+    function currentBin() external view returns (int24) {
+        return book.currentBin;
+    }
+
+    function _getAmountIn(AddLiquidityParams memory params)
+        internal
+        override
+        returns (uint256 amount0, uint256 amount1, uint256 shares)
+    {
+        if (!book.configured) revert PoolNotConfigured();
+        if (params.amount0Desired == 0 && params.amount1Desired == 0) revert ZeroAmounts();
+
+        uint256 LBase = _previewLBase(params.amount0Desired, params.amount1Desired);
+        (amount0, amount1) = _applyLBase(LBase);
+        shares = amount0 + amount1;
+        if (shares == 0) revert ZeroAmounts();
+    }
+
+    function _getAmountOut(RemoveLiquidityParams memory) internal pure override returns (uint256, uint256, uint256) {
+        revert RemovalNotSupported();
+    }
+
+    function _getUnspecifiedAmount(SwapParams calldata params) internal override returns (uint256 unspecifiedAmount) {
+        if (params.amountSpecified >= 0) revert ExactOutputNotSupported();
+        if (!book.seeded) revert BinMath.InsufficientLiquidity();
+        unspecifiedAmount = _swapExactIn(uint256(-params.amountSpecified), params.zeroForOne);
+    }
+
+    function _swapExactIn(uint256 amountIn, bool zeroForOne) internal returns (uint256 amountOut) {
+        uint256 amountInNet = BinMath.applyFee(amountIn, poolKey.fee);
+        if (RATCHET_ENABLED) _resetRatchetIfNewBlock();
+
+        (BinMath.Bin[] memory bins, uint256 active) = _loadBins();
+        uint256 lo = 0;
+        uint256 hi = bins.length == 0 ? 0 : bins.length - 1;
+        if (RATCHET_ENABLED) (lo, hi) = _ratchetClamp(bins.length);
+        uint160 sqrtStart = book.sqrtPriceX96;
+
+        uint256 used;
+        uint160 sqrtEnd;
+        uint256 endIndex;
+        (amountOut, used, sqrtEnd, endIndex) =
+            BinMath.swapExactIn(bins, sqrtStart, active, amountInNet, zeroForOne, lo, hi);
+
+        if (used < amountInNet) revert BinMath.InsufficientLiquidity();
+        _commitSwap(sqrtEnd, endIndex, zeroForOne);
+    }
+
+    function _commitSwap(uint160 sqrtEnd, uint256 endIndex, bool zeroForOne) internal {
+        int24 endBin = book.minBin + int24(int256(endIndex));
+        book.sqrtPriceX96 = sqrtEnd;
+        book.currentBin = endBin;
+        if (RATCHET_ENABLED) {
+            book.ratchetBlock = uint32(block.number);
+            if (zeroForOne) {
+                book.ratchetHi = endBin;
+            } else {
+                book.ratchetLo = endBin;
+            }
         }
     }
 
-    /// @notice Snap a tick up to the upper boundary of its bin
-    function _snapToUpperBin(int24 tick, int24 binSize) internal pure returns (int24) {
-        if (tick >= 0) {
-            return ((tick + binSize - 1) / binSize) * binSize;
-        } else {
-            return -(((-tick - 1) / binSize) * binSize);
+    function _getSwapFeeAmount(SwapParams calldata, uint256) internal pure override returns (uint256) {
+        return 0;
+    }
+
+    function _mint(AddLiquidityParams memory, BalanceDelta, BalanceDelta, uint256 shares) internal override {
+        PoolId id = poolKey.toId();
+        totalShares[id] += shares;
+        sharesOf[id][msg.sender] += shares;
+    }
+
+    function _burn(RemoveLiquidityParams memory, BalanceDelta, BalanceDelta, uint256) internal pure override {
+        revert RemovalNotSupported();
+    }
+
+    function _previewLBase(uint256 amount0Desired, uint256 amount1Desired) internal view returns (uint256 LBase) {
+        (int24 minB, int24 maxB, int24 cur) = _binRange();
+        uint256 need0;
+        uint256 need1;
+        uint256 probe = 1e18;
+        uint160 sqrtP = book.sqrtPriceX96;
+
+        for (int24 idx = minB; idx <= maxB; ++idx) {
+            uint256 Li = LinearDecay.computeLPerBin(probe, book.ramp, _distance(idx, cur));
+            if (Li == 0) continue;
+            (uint256 t0, uint256 t1) = _amountsFor(idx, Li, sqrtP);
+            need0 += t0;
+            need1 += t1;
         }
+
+        if (need0 == 0 && need1 == 0) revert BinMath.InsufficientLiquidity();
+
+        uint256 s0 = need0 == 0 ? type(uint256).max : amount0Desired * probe / need0;
+        uint256 s1 = need1 == 0 ? type(uint256).max : amount1Desired * probe / need1;
+        LBase = s0 < s1 ? s0 : s1;
+        if (LBase == 0) revert ZeroAmounts();
+    }
+
+    function _applyLBase(uint256 LBase) internal returns (uint256 amount0, uint256 amount1) {
+        (int24 minB, int24 maxB, int24 cur) = _binRange();
+        if (!book.seeded) {
+            book.minBin = minB;
+            book.maxBin = maxB;
+            book.currentBin = cur;
+            book.ratchetLo = minB;
+            book.ratchetHi = maxB;
+            book.seeded = true;
+        }
+
+        uint160 sqrtP = book.sqrtPriceX96;
+        for (int24 idx = minB; idx <= maxB; ++idx) {
+            uint256 addL = LinearDecay.computeLPerBin(LBase, book.ramp, _distance(idx, cur));
+            if (addL == 0) continue;
+            (uint256 t0, uint256 t1) = _amountsFor(idx, addL, sqrtP);
+            amount0 += t0;
+            amount1 += t1;
+            uint256 next = uint256(liquidity[idx]) + addL;
+            liquidity[idx] = uint128(next);
+        }
+    }
+
+    function _binRange() internal view returns (int24 minB, int24 maxB, int24 cur) {
+        if (book.seeded) {
+            return (book.minBin, book.maxBin, book.currentBin);
+        }
+        int24 tick = TickMath.getTickAtSqrtPrice(book.sqrtPriceX96);
+        cur = _floorDiv(tick, book.binSize);
+        int24 n = int24(uint24(book.numBinsPerSide));
+        minB = cur - n;
+        maxB = cur + n - 1;
+    }
+
+    function _distance(int24 binIndex, int24 cur) internal pure returns (uint256) {
+        if (binIndex < cur) return uint256(int256(cur - binIndex));
+        return uint256(int256(binIndex - cur + 1));
+    }
+
+    function _amountsFor(int24 binIndex, uint256 L, uint160 sqrtP)
+        internal
+        view
+        returns (uint256 token0, uint256 token1)
+    {
+        int24 tickLo = binIndex * book.binSize;
+        uint160 sqrtLo = TickMath.getSqrtPriceAtTick(tickLo);
+        uint160 sqrtHi = TickMath.getSqrtPriceAtTick(tickLo + book.binSize);
+        return LiquidityLibrary.getTokenAmountsForBin(
+            L, uint256(sqrtP), LiquidityLibrary.BinBounds(uint256(sqrtLo), uint256(sqrtHi))
+        );
+    }
+
+    function _loadBins() internal view returns (BinMath.Bin[] memory bins, uint256 active) {
+        uint256 n = uint256(int256(book.maxBin - book.minBin + 1));
+        bins = new BinMath.Bin[](n);
+        int24 size = book.binSize;
+        for (uint256 i = 0; i < n; ++i) {
+            int24 idx = book.minBin + int24(int256(i));
+            int24 tickLo = idx * size;
+            bins[i] = BinMath.Bin({
+                L: liquidity[idx],
+                sqrtLo: TickMath.getSqrtPriceAtTick(tickLo),
+                sqrtHi: TickMath.getSqrtPriceAtTick(tickLo + size)
+            });
+            if (idx == book.currentBin) active = i;
+        }
+    }
+
+    function _ratchetClamp(uint256 n) internal view returns (uint256 lo, uint256 hi) {
+        int24 rLo = book.ratchetLo;
+        int24 rHi = book.ratchetHi;
+        lo = uint256(int256(rLo - book.minBin));
+        hi = uint256(int256(rHi - book.minBin));
+        if (hi >= n) hi = n - 1;
+        if (lo > hi) lo = hi;
+    }
+
+    function _resetRatchetIfNewBlock() internal {
+        if (book.ratchetBlock != uint32(block.number)) {
+            book.ratchetLo = book.minBin;
+            book.ratchetHi = book.maxBin;
+        }
+    }
+
+    function _floorDiv(int24 a, int24 b) internal pure returns (int24) {
+        int24 q = a / b;
+        if (a % b != 0 && a < 0) q -= 1;
+        return q;
     }
 }
