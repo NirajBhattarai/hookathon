@@ -71,25 +71,24 @@ contract BinRatchetRegimesTest is BaseTest {
         poolManager.initialize(live.key, Constants.SQRT_PRICE_1_1);
         live.hook.setBinSize(live.key, r.binSize);
 
-        live.hook.addLiquidity(
-            BaseCustomAccounting.AddLiquidityParams({
-                amount0Desired: 100 ether,
-                amount1Desired: 100 ether,
-                amount0Min: 0,
-                amount1Min: 0,
-                deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
-                userInputSalt: bytes32(0)
-            })
-        );
+        live.hook
+            .addLiquidity(
+                BaseCustomAccounting.AddLiquidityParams({
+                    amount0Desired: 100 ether,
+                    amount1Desired: 100 ether,
+                    amount0Min: 0,
+                    amount1Min: 0,
+                    deadline: block.timestamp,
+                    tickLower: 0,
+                    tickUpper: 0,
+                    userInputSalt: bytes32(0)
+                })
+            );
     }
 
     function _priceMoveBps(Live memory live, uint256 amountIn, bool zeroForOne) internal returns (uint256) {
         uint256 p0 = uint256(live.hook.currentSqrtPriceX96());
-        swapRouter.swapExactTokensForTokens(
-            amountIn, 0, zeroForOne, live.key, "", address(this), block.timestamp
-        );
+        swapRouter.swapExactTokensForTokens(amountIn, 0, zeroForOne, live.key, "", address(this), block.timestamp);
         uint256 p1 = uint256(live.hook.currentSqrtPriceX96());
         uint256 hi = p0 > p1 ? p0 : p1;
         uint256 lo = p0 > p1 ? p1 : p0;

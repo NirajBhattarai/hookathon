@@ -340,23 +340,17 @@ contract LiquidityLibraryTest is Test {
     function test_MixedDecimals_GetTokenAmounts() public view {
         // Verify token amounts work the same regardless of decimals
         // (sqrtPriceX96 and L are decimal-agnostic)
-        LiquidityLibrary.BinBounds memory bounds =
-            LiquidityLibrary.BinBounds(1000 * Q96, 2000 * Q96);
+        LiquidityLibrary.BinBounds memory bounds = LiquidityLibrary.BinBounds(1000 * Q96, 2000 * Q96);
 
-        (uint256 t0_18, uint256 t1_18) =
-            LiquidityLibrary.getTokenAmountsForBin(1e18, 3000 * Q96, bounds);
+        (uint256 t0_18, uint256 t1_18) = LiquidityLibrary.getTokenAmountsForBin(1e18, 3000 * Q96, bounds);
 
         // With different decimals, the sqrtPriceX96 values are the same,
         // so token amounts in Q96 space are identical
-        (uint256 t0_6, uint256 t1_6) =
-            LiquidityLibrary.getTokenAmountsForBin(1e18, 3000 * Q96, bounds);
+        (uint256 t0_6, uint256 t1_6) = LiquidityLibrary.getTokenAmountsForBin(1e18, 3000 * Q96, bounds);
 
         assertEq(t0_18, t0_6);
         assertEq(t1_18, t1_6);
     }
-
-
-
 
     function testFuzz_PriceRoundtrip_MixedDecimals(uint256 price, uint8 d0, uint8 d1) public view {
         // Test roundtrip for various decimal combinations
@@ -462,7 +456,6 @@ contract LiquidityLibraryTest is Test {
         assertLe(w1, totalToken1);
     }
 
-
     function test_Invariant_SqrtSquareLessThanOrEqual() public view {
         uint256 x = 123456789;
         uint256 r = LiquidityLibrary.sqrt(x);
@@ -485,7 +478,6 @@ contract LiquidityLibraryTest is Test {
         assertGt(t0, 0);
         assertEq(t1, 0);
     }
-
 
     // ════════════════════════════════════════════════
     //  Fuzz Tests
@@ -557,8 +549,6 @@ contract LiquidityLibraryTest is Test {
         assertLe(a0, totalToken0);
         assertLe(a1, totalToken1);
     }
-
-
 
     function testFuzz_MintWithdrawRoundtrip(uint256 token0, uint256 token1, uint256 totalSupply) public view {
         token0 = bound(token0, 1, 1e18);

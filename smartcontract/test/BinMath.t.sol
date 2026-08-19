@@ -11,11 +11,10 @@ contract BinMathTest is Test {
     uint128 constant L = 1e18;
 
     function _bin(int24 tickLo, int24 tickHi) internal pure returns (BinMath.Bin memory) {
-        return BinMath.Bin({
-            L: L,
-            sqrtLo: TickMath.getSqrtPriceAtTick(tickLo),
-            sqrtHi: TickMath.getSqrtPriceAtTick(tickHi)
-        });
+        return
+            BinMath.Bin({
+                L: L, sqrtLo: TickMath.getSqrtPriceAtTick(tickLo), sqrtHi: TickMath.getSqrtPriceAtTick(tickHi)
+            });
     }
 
     function test_singleBin_exactIn_token1_matchesDelta() public pure {
@@ -202,8 +201,7 @@ contract BinMathTest is Test {
         bins[1] = _bin(60, 120);
 
         uint256 inUp = SqrtPriceMath.getAmount1Delta(bins[0].sqrtLo, bins[0].sqrtHi, L, true) / 4;
-        (uint256 outUp, uint256 usedUp, uint160 p1,) =
-            BinMath.swapExactIn(bins, bins[0].sqrtLo, 0, inUp, false, 0, 1);
+        (uint256 outUp, uint256 usedUp, uint160 p1,) = BinMath.swapExactIn(bins, bins[0].sqrtLo, 0, inUp, false, 0, 1);
         assertEq(usedUp, inUp);
         assertGt(p1, bins[0].sqrtLo);
 

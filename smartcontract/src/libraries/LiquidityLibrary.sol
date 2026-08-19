@@ -52,7 +52,12 @@ library LiquidityLibrary {
         }
     }
 
-    function sqrtPriceX96ToPrice(uint256 sqrtPriceX96, uint8 /* decimals0 */, uint8 /* decimals1 */)
+    function sqrtPriceX96ToPrice(
+        uint256 sqrtPriceX96,
+        uint8,
+        /* decimals0 */
+        uint8 /* decimals1 */
+    )
         internal
         pure
         returns (uint256)

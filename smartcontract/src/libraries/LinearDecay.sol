@@ -32,7 +32,11 @@ library LinearDecay {
     }
 
     function getDepositAmountsBelowPrice(
-        uint256 sqrtPriceCurrent, uint256 binSpacing, uint256 numBins, uint256 ramp, uint256 LBase
+        uint256 sqrtPriceCurrent,
+        uint256 binSpacing,
+        uint256 numBins,
+        uint256 ramp,
+        uint256 LBase
     ) internal pure returns (uint256 totalToken0, uint256 totalToken1) {
         if (numBins == 0 || LBase == 0) return (0, 0);
         for (uint256 i = 0; i < numBins; i++) {
@@ -40,14 +44,19 @@ library LinearDecay {
             uint256 L = computeLPerBin(LBase, ramp, distance);
             uint256 lo = sqrtPriceCurrent - (i + 1) * binSpacing;
             uint256 hi = sqrtPriceCurrent - i * binSpacing;
-            (uint256 t0, uint256 t1) = LiquidityLibrary.getTokenAmountsForBin(L, sqrtPriceCurrent, LiquidityLibrary.BinBounds(lo, hi));
+            (uint256 t0, uint256 t1) =
+                LiquidityLibrary.getTokenAmountsForBin(L, sqrtPriceCurrent, LiquidityLibrary.BinBounds(lo, hi));
             totalToken0 += t0;
             totalToken1 += t1;
         }
     }
 
     function getDepositAmountsAbovePrice(
-        uint256 sqrtPriceCurrent, uint256 binSpacing, uint256 numBins, uint256 ramp, uint256 LBase
+        uint256 sqrtPriceCurrent,
+        uint256 binSpacing,
+        uint256 numBins,
+        uint256 ramp,
+        uint256 LBase
     ) internal pure returns (uint256 totalToken0, uint256 totalToken1) {
         if (numBins == 0 || LBase == 0) return (0, 0);
         for (uint256 i = 0; i < numBins; i++) {
@@ -55,7 +64,8 @@ library LinearDecay {
             uint256 L = computeLPerBin(LBase, ramp, distance);
             uint256 lo = sqrtPriceCurrent + i * binSpacing;
             uint256 hi = sqrtPriceCurrent + (i + 1) * binSpacing;
-            (uint256 t0, uint256 t1) = LiquidityLibrary.getTokenAmountsForBin(L, sqrtPriceCurrent, LiquidityLibrary.BinBounds(lo, hi));
+            (uint256 t0, uint256 t1) =
+                LiquidityLibrary.getTokenAmountsForBin(L, sqrtPriceCurrent, LiquidityLibrary.BinBounds(lo, hi));
             totalToken0 += t0;
             totalToken1 += t1;
         }
