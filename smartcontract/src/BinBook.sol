@@ -20,11 +20,10 @@ import {BinMath} from "./libraries/BinMath.sol";
 import {LinearDecay} from "./libraries/LinearDecay.sol";
 import {LiquidityLibrary} from "./libraries/LiquidityLibrary.sol";
 
-/// @title BinRatchet
+/// @title BinBook
 /// @notice Hook-owned bin book. Each bin is a mini x*y=k range. LinearDecay sizes L.
 ///         Pass tickLower/tickUpper on addLiquidity to place anywhere; the book grows to cover it.
-///         Ratchet locks reverse (currently off).
-contract BinRatchet is BaseCustomCurve {
+contract BinBook is BaseCustomCurve {
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
 
@@ -34,8 +33,6 @@ contract BinRatchet is BaseCustomCurve {
     uint16 public constant MAX_BINS_PER_ADD = 256;
     /// @dev Cap on the contiguous book. Swaps load every bin in `[minBin, maxBin]`.
     uint16 public constant MAX_BOOK_BINS = 1024;
-    /// @dev Temporary: allow same-block reverse so price can walk back. Re-enable for MEV lock.
-    bool public constant RATCHET_ENABLED = false;
 
     uint160 public constant HOOK_FLAGS = uint160(
         Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
@@ -50,9 +47,6 @@ contract BinRatchet is BaseCustomCurve {
         int24 minBin;
         int24 maxBin;
         uint160 sqrtPriceX96;
-        int24 ratchetLo;
-        int24 ratchetHi;
-        uint32 ratchetBlock;
         bool configured;
         bool seeded;
     }
@@ -230,12 +224,10 @@ contract BinRatchet is BaseCustomCurve {
 
     function _swapExactIn(uint256 amountIn, bool zeroForOne) internal returns (uint256 amountOut) {
         uint256 amountInNet = BinMath.applyFee(amountIn, poolKey.fee);
-        if (RATCHET_ENABLED) _resetRatchetIfNewBlock();
 
         (BinMath.Bin[] memory bins, uint256 active) = _loadBins();
-        uint256 lo = 0;
-        uint256 hi = bins.length == 0 ? 0 : bins.length - 1;
-        if (RATCHET_ENABLED) (lo, hi) = _ratchetClamp(bins.length);
+        if (bins.length == 0) revert BinMath.InsufficientLiquidity();
+        uint256 last = bins.length - 1;
 
         SwapWalk memory w = SwapWalk({
             remaining: amountInNet,
@@ -251,19 +243,16 @@ contract BinRatchet is BaseCustomCurve {
         });
 
         if (zeroForOne) {
-            uint256 start = active < hi ? active : hi;
-            if (start < lo) revert BinMath.InsufficientLiquidity();
-            for (uint256 i = start; i >= lo;) {
+            for (uint256 i = active;;) {
                 _swapStep(w, bins[i], i);
                 if (w.remaining == 0) break;
-                if (i == lo) break;
+                if (i == 0) break;
                 unchecked {
                     --i;
                 }
             }
         } else {
-            uint256 start = active > lo ? active : lo;
-            for (uint256 i = start; i <= hi; ++i) {
+            for (uint256 i = active; i <= last; ++i) {
                 _swapStep(w, bins[i], i);
                 if (w.remaining == 0) break;
             }
@@ -274,7 +263,7 @@ contract BinRatchet is BaseCustomCurve {
             _creditFee(w.lastFeeBin, w.feeTotal - w.credited, zeroForOne);
         }
         _lastSwapFee = w.feeTotal;
-        _commitSwap(w.sqrtEnd, w.endIndex, zeroForOne);
+        _commitSwap(w.sqrtEnd, w.endIndex);
         amountOut = w.amountOut;
     }
 
@@ -293,18 +282,9 @@ contract BinRatchet is BaseCustomCurve {
         w.wroteFee = true;
     }
 
-    function _commitSwap(uint160 sqrtEnd, uint256 endIndex, bool zeroForOne) internal {
-        int24 endBin = book.minBin + int24(int256(endIndex));
+    function _commitSwap(uint160 sqrtEnd, uint256 endIndex) internal {
         book.sqrtPriceX96 = sqrtEnd;
-        book.currentBin = endBin;
-        if (RATCHET_ENABLED) {
-            book.ratchetBlock = uint32(block.number);
-            if (zeroForOne) {
-                book.ratchetHi = endBin;
-            } else {
-                book.ratchetLo = endBin;
-            }
-        }
+        book.currentBin = book.minBin + int24(int256(endIndex));
     }
 
     function _getSwapFeeAmount(SwapParams calldata, uint256) internal view override returns (uint256) {
@@ -515,8 +495,6 @@ contract BinRatchet is BaseCustomCurve {
             book.seeded = true;
             book.minBin = minB;
             book.maxBin = maxB;
-            book.ratchetLo = minB;
-            book.ratchetHi = maxB;
             emit BookExpanded(minB, maxB);
         } else {
             bool grew;
@@ -528,8 +506,6 @@ contract BinRatchet is BaseCustomCurve {
                 book.maxBin = maxB;
                 grew = true;
             }
-            if (minB < book.ratchetLo) book.ratchetLo = minB;
-            if (maxB > book.ratchetHi) book.ratchetHi = maxB;
             if (grew) emit BookExpanded(book.minBin, book.maxBin);
         }
 
@@ -578,22 +554,6 @@ contract BinRatchet is BaseCustomCurve {
                 sqrtHi: TickMath.getSqrtPriceAtTick(tickLo + book.binSize)
             });
             if (idx == book.currentBin) active = i;
-        }
-    }
-
-    function _ratchetClamp(uint256 n) internal view returns (uint256 lo, uint256 hi) {
-        int24 rLo = book.ratchetLo;
-        int24 rHi = book.ratchetHi;
-        lo = uint256(int256(rLo - book.minBin));
-        hi = uint256(int256(rHi - book.minBin));
-        if (hi >= n) hi = n - 1;
-        if (lo > hi) lo = hi;
-    }
-
-    function _resetRatchetIfNewBlock() internal {
-        if (book.ratchetBlock != uint32(block.number)) {
-            book.ratchetLo = book.minBin;
-            book.ratchetHi = book.maxBin;
         }
     }
 

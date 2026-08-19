@@ -12,11 +12,11 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
-import {BinRatchet} from "../src/BinRatchet.sol";
+import {BinBook} from "../src/BinBook.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
 /// @dev Same three books as the MEV analysis: stable / mid / meme.
-contract BinRatchetRegimesTest is BaseTest {
+contract BinBookRegimesTest is BaseTest {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -34,7 +34,7 @@ contract BinRatchetRegimesTest is BaseTest {
     }
 
     struct Live {
-        BinRatchet hook;
+        BinBook hook;
         PoolKey key;
         PoolId id;
         Currency c0;
@@ -57,8 +57,8 @@ contract BinRatchetRegimesTest is BaseTest {
 
     function _deploy(Regime memory r, uint160 salt) internal returns (Live memory live) {
         address flags = address(uint160(HOOK_FLAGS) | (salt << 20));
-        deployCodeTo("BinRatchet.sol:BinRatchet", abi.encode(poolManager), flags);
-        live.hook = BinRatchet(flags);
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags);
+        live.hook = BinBook(flags);
 
         (live.c0, live.c1) = deployCurrencyPair();
         MockERC20(Currency.unwrap(live.c0)).approve(address(live.hook), type(uint256).max);

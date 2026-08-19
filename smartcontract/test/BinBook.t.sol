@@ -13,10 +13,10 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
-import {BinRatchet} from "../src/BinRatchet.sol";
+import {BinBook} from "../src/BinBook.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
-contract BinRatchetTest is BaseTest {
+contract BinBookTest is BaseTest {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -28,7 +28,7 @@ contract BinRatchetTest is BaseTest {
     Currency currency0;
     Currency currency1;
     PoolKey poolKey;
-    BinRatchet hook;
+    BinBook hook;
     PoolId poolId;
 
     function setUp() public {
@@ -36,8 +36,8 @@ contract BinRatchetTest is BaseTest {
         (currency0, currency1) = deployCurrencyPair();
 
         address flags = address(uint160(HOOK_FLAGS));
-        deployCodeTo("BinRatchet.sol:BinRatchet", abi.encode(poolManager), flags);
-        hook = BinRatchet(flags);
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags);
+        hook = BinBook(flags);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolId = poolKey.toId();
@@ -80,7 +80,6 @@ contract BinRatchetTest is BaseTest {
         Hooks.Permissions memory p = hook.getHookPermissions();
         assertTrue(p.beforeInitialize && p.afterInitialize && p.beforeAddLiquidity);
         assertTrue(p.beforeRemoveLiquidity && p.beforeSwap && p.beforeSwapReturnDelta);
-        assertFalse(hook.RATCHET_ENABLED());
         assertEq(hook.DEFAULT_RAMP(), 10);
         assertEq(hook.DEFAULT_BINS_PER_SIDE(), 10);
     }
@@ -91,7 +90,7 @@ contract BinRatchetTest is BaseTest {
 
     function test_setBinSize_succeeds() public {
         vm.expectEmit(address(hook));
-        emit BinRatchet.BinSizeSet(poolId, address(this), 60);
+        emit BinBook.BinSizeSet(poolId, address(this), 60);
         hook.setBinSize(poolKey, 60);
         assertEq(hook.getBinSize(poolId), 60);
         assertTrue(hook.isConfigured(poolId));
@@ -104,18 +103,18 @@ contract BinRatchetTest is BaseTest {
 
     function test_setBinSize_reverts() public {
         vm.prank(address(0xBEEF));
-        vm.expectRevert(BinRatchet.NotPoolCreator.selector);
+        vm.expectRevert(BinBook.NotPoolCreator.selector);
         hook.setBinSize(poolKey, 60);
 
-        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
         hook.setBinSize(poolKey, 0);
-        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
         hook.setBinSize(poolKey, -10);
-        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
         hook.setBinSize(poolKey, 2001);
 
         hook.setBinSize(poolKey, 60);
-        vm.expectRevert(BinRatchet.BinSizeAlreadySet.selector);
+        vm.expectRevert(BinBook.BinSizeAlreadySet.selector);
         hook.setBinSize(poolKey, 120);
     }
 
@@ -123,8 +122,8 @@ contract BinRatchetTest is BaseTest {
         hook.setBinSize(poolKey, 60);
         (Currency c0, Currency c1) = deployCurrencyPair();
         address flags2 = address(uint160(HOOK_FLAGS) | (uint160(1) << 20));
-        deployCodeTo("BinRatchet.sol:BinRatchet", abi.encode(poolManager), flags2);
-        BinRatchet hook2 = BinRatchet(flags2);
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags2);
+        BinBook hook2 = BinBook(flags2);
         PoolKey memory key2 = PoolKey(c0, c1, 3000, 60, IHooks(address(hook2)));
         poolManager.initialize(key2, Constants.SQRT_PRICE_1_1);
         hook2.setBinSize(key2, 200);
@@ -145,14 +144,14 @@ contract BinRatchetTest is BaseTest {
 
     function test_addLiquidity_reverts_notConfigured() public {
         _approve();
-        vm.expectRevert(BinRatchet.PoolNotConfigured.selector);
+        vm.expectRevert(BinBook.PoolNotConfigured.selector);
         _add(1 ether, 1 ether);
     }
 
     function test_addLiquidity_reverts_zero() public {
         hook.setBinSize(poolKey, 60);
         _approve();
-        vm.expectRevert(BinRatchet.ZeroAmounts.selector);
+        vm.expectRevert(BinBook.ZeroAmounts.selector);
         _add(0, 0);
     }
 
@@ -183,7 +182,7 @@ contract BinRatchetTest is BaseTest {
 
     function test_removeLiquidity_reverts() public {
         _seed();
-        vm.expectRevert(BinRatchet.RemovalNotSupported.selector);
+        vm.expectRevert(BinBook.RemovalNotSupported.selector);
         hook.removeLiquidity(
             BaseCustomAccounting.RemoveLiquidityParams({
                 liquidity: 1,
@@ -274,7 +273,7 @@ contract BinRatchetTest is BaseTest {
     function test_addLiquidity_range_reverts_misaligned() public {
         hook.setBinSize(poolKey, 60);
         _approve();
-        vm.expectRevert(BinRatchet.TicksNotAlignedToBins.selector);
+        vm.expectRevert(BinBook.TicksNotAlignedToBins.selector);
         _addRange(0, 1 ether, -181, -60);
     }
 
@@ -282,7 +281,7 @@ contract BinRatchetTest is BaseTest {
         hook.setBinSize(poolKey, 60);
         _approve();
         // 257 bins of size 60
-        vm.expectRevert(BinRatchet.TooManyBins.selector);
+        vm.expectRevert(BinBook.TooManyBins.selector);
         _addRange(0, 1 ether, -257 * 60, 0);
     }
 

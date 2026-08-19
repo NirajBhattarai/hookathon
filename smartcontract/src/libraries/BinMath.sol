@@ -59,7 +59,7 @@ library BinMath {
         }
     }
 
-    /// @dev Exact-in walk across `bins` (ascending price). `lo`/`hi` are inclusive index clamps (ratchet).
+    /// @dev Exact-in walk across `bins` (ascending price). `lo`/`hi` are inclusive index clamps.
     function swapExactIn(
         Bin[] memory bins,
         uint160 sqrtP,

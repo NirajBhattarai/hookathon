@@ -109,7 +109,7 @@ def swap_pool(
     """
     Swap through bins (ascending p_lo).
     ratchet_lo / ratchet_hi clamp the walk so a reverse cannot re-enter
-    bins already left — this is the BinRatchet lock.
+    bins already left — this is the BinBook lock.
     Returns (amount_out, p_end, end_bin_index).
     """
     remaining = amount_in * (1.0 - fee)

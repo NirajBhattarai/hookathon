@@ -2,7 +2,7 @@
 
 ## Overview
 
-BinRatchet hook follows the **hook-owned liquidity** pattern (`BaseCustomAccounting` style).
+BinBook hook follows the **hook-owned liquidity** pattern (`BaseCustomAccounting` style).
 The hook is the owner of all positions in the pool. Users deposit tokens → hook distributes
 across bins → hook manages positions.
 
@@ -26,7 +26,7 @@ Return unused tokens to user
 
 ## Files to Modify
 
-### 1. `src/BinRatchet.sol` — Major Changes
+### 1. `src/BinBook.sol` — Major Changes
 
 **New imports:**
 
@@ -128,7 +128,7 @@ function _beforeAddLiquidity(..., ModifyLiquidityParams calldata params, ...) {
 }
 ```
 
-### 2. `test/fuzz/BinRatchetFuzz.t.sol` — New Fuzz Tests
+### 2. `test/fuzz/BinBookFuzz.t.sol` — New Fuzz Tests
 
 ```solidity
 // Fuzz test for tick alignment
@@ -143,7 +143,7 @@ function test_fuzz_perBin_capRedistribute(uint256 amount0, uint256 amount1) publ
 }
 ```
 
-### 3. `test/BinRatchet.t.sol` — Unit Tests
+### 3. `test/BinBook.t.sol` — Unit Tests
 
 - `test_addLiquidity_succeeds` — basic flow
 - `test_addLiquidity_reverts_misalignedTicks` — alignment check

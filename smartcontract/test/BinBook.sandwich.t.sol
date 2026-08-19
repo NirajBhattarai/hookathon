@@ -12,11 +12,11 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
-import {BinRatchet} from "../src/BinRatchet.sol";
+import {BinBook} from "../src/BinBook.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
-/// @dev Sandwich ROI: LinearDecay bin book (ratchet OFF) vs flat x*y=k with the same capital and fee.
-contract BinRatchetSandwichTest is BaseTest {
+/// @dev Sandwich ROI: LinearDecay bin book vs flat x*y=k with the same capital and fee.
+contract BinBookSandwichTest is BaseTest {
     using CurrencyLibrary for Currency;
 
     uint160 internal constant HOOK_FLAGS = uint160(
@@ -25,7 +25,7 @@ contract BinRatchetSandwichTest is BaseTest {
     );
 
     struct Live {
-        BinRatchet hook;
+        BinBook hook;
         PoolKey key;
         Currency c0;
         Currency c1;
@@ -40,8 +40,8 @@ contract BinRatchetSandwichTest is BaseTest {
 
     function _deploy(uint24 fee, int24 tickSpacing, int24 binSize, uint160 salt) internal returns (Live memory live) {
         address flags = address(uint160(HOOK_FLAGS) | (salt << 20));
-        deployCodeTo("BinRatchet.sol:BinRatchet", abi.encode(poolManager), flags);
-        live.hook = BinRatchet(flags);
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags);
+        live.hook = BinBook(flags);
         live.fee = fee;
 
         (live.c0, live.c1) = deployCurrencyPair();
@@ -144,21 +144,52 @@ contract BinRatchetSandwichTest is BaseTest {
         console2.log("  TVL token0/token1", live.reserve0, live.reserve1);
         console2.log("  victimIn", victimIn);
         console2.log("  x*y=k ROI (wad, 1e18=100%)", xykRoi);
-        console2.log("  bin+LinearDecay ROI (ratchet OFF)", hookRoi);
+        console2.log("  bin+LinearDecay ROI", hookRoi);
     }
 
-    function test_sandwich_stable_binsBeatXykWithoutRatchet() public {
+    function test_sandwich_stable_binsBeatXyk() public {
         (int256 hookRoi, int256 xykRoi) = _run("STABLE  1bps  0.20% bins  5% clip", 100, 1, 20, 10 ether, 1);
         assertLt(hookRoi, xykRoi, "bins should be less profitable to sandwich than x*y=k");
     }
 
-    function test_sandwich_mid_binsBeatXykWithoutRatchet() public {
+    function test_sandwich_mid_binsBeatXyk() public {
         (int256 hookRoi, int256 xykRoi) = _run("MID     5bps  1.00% bins  1% clip", 500, 10, 100, 2 ether, 2);
         assertLt(hookRoi, xykRoi, "bins should be less profitable to sandwich than x*y=k");
     }
 
-    function test_sandwich_meme_binsBeatXykWithoutRatchet() public {
+    function test_sandwich_meme_binsBeatXyk() public {
         (int256 hookRoi, int256 xykRoi) = _run("MEME   30bps  3.00% bins  3% clip", 3000, 60, 300, 6 ether, 3);
         assertLt(hookRoi, xykRoi, "bins should be less profitable to sandwich than x*y=k");
+    }
+
+    /// @dev Meme book. Attacker = 2x victim. Same TVL/fee as x*y=k.
+    function test_sandwich_meme_sweep() public {
+        uint256[6] memory clips = [uint256(1 ether), 2 ether, 4 ether, 6 ether, 10 ether, 20 ether];
+        string[6] memory labels = ["0.5% TVL", "1% TVL", "2% TVL", "3% TVL", "5% TVL", "10% TVL"];
+
+        console2.log("MEME sandwich sweep  fee=30bps  bin~3%  LinearDecay");
+        console2.log("attacker = 2x victimIn; ROI = (backOut - attackerIn) / attackerIn");
+        console2.log("protection = 1 - hookRoi/xykRoi  (100% if hook ROI <= 0)");
+
+        for (uint256 i = 0; i < clips.length; ++i) {
+            Live memory live = _deploy(3000, 60, 300, uint160(10 + i));
+            int256 xykRoi = _xykSandwichRoiWad(live.reserve0, live.reserve1, clips[i], 3000);
+            int256 hookRoi = _hookSandwichRoiWad(live, clips[i]);
+            int256 saved;
+            if (xykRoi <= 0) {
+                saved = 0;
+            } else if (hookRoi <= 0) {
+                saved = 1e18;
+            } else {
+                saved = 1e18 - (hookRoi * 1e18 / xykRoi);
+            }
+            console2.log("---");
+            console2.log(labels[i]);
+            console2.log("  victimIn", clips[i]);
+            console2.log("  x*y=k attacker ROI wad", xykRoi);
+            console2.log("  bin attacker ROI wad", hookRoi);
+            console2.log("  MEV profit cut wad (1e18=100%)", saved);
+            assertLt(hookRoi, xykRoi, "meme bins should cut sandwich vs x*y=k");
+        }
     }
 }

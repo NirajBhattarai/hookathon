@@ -88,7 +88,7 @@ contract BinMathTest is Test {
         assertGt(out, 0);
     }
 
-    function test_walk_ratchetClamp_blocksSecondBin() public pure {
+    function test_walk_hiClamp_blocksSecondBin() public pure {
         BinMath.Bin[] memory bins = new BinMath.Bin[](2);
         bins[0] = _bin(0, 60);
         bins[1] = _bin(60, 120);
