@@ -232,83 +232,78 @@ contract BinBook is BaseCustomCurve {
         unspecifiedAmount = _swapExactIn(key, uint256(-params.amountSpecified), params.zeroForOne);
     }
 
-    struct SwapWalk {
+    /// @dev Running totals for one swap across the book.
+    struct WalkCtx {
         uint256 remaining;
         uint256 amountOut;
+        uint256 feeTotal;
         uint160 sqrtEnd;
         uint256 endIndex;
-        uint256 feeTotal;
-        uint256 amountInNet;
-        uint256 credited;
-        int24 lastFeeBin;
-        bool wroteFee;
-        bool zeroForOne;
     }
 
+    /// @notice Exact-in swap walking the book with Uniswap-style per-step fees.
+    /// @dev Each step runs SwapMath.computeSwapStep against one bin; the step's fee is
+    ///      credited to that bin immediately, so only bins that absorb volume earn.
     function _swapExactIn(PoolKey calldata key, uint256 amountIn, bool zeroForOne)
         internal
         returns (uint256 amountOut)
     {
         PoolId id = key.toId();
         Book storage b = books[id];
-        uint256 amountInNet = SwapMath.applyFee(amountIn, key.fee);
 
         (SwapMath.Bin[] memory bins, uint256 active) = _loadBins(id);
         if (bins.length == 0) revert SwapMath.InsufficientLiquidity();
-        uint256 last = bins.length - 1;
 
-        SwapWalk memory w = SwapWalk({
-            remaining: amountInNet,
-            amountOut: 0,
-            sqrtEnd: b.sqrtPriceX96,
-            endIndex: active,
-            feeTotal: amountIn - amountInNet,
-            amountInNet: amountInNet,
-            credited: 0,
-            lastFeeBin: b.currentBin,
-            wroteFee: false,
-            zeroForOne: zeroForOne
-        });
+        WalkCtx memory w;
+        w.remaining = amountIn;
+        w.sqrtEnd = b.sqrtPriceX96;
+        w.endIndex = active;
 
         if (zeroForOne) {
             for (uint256 i = active;;) {
-                _swapStep(id, w, bins[i], i);
-                if (w.remaining == 0) break;
-                if (i == 0) break;
+                SwapMath.CoreStep memory c = _coreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, true);
+                w.remaining -= c.amountIn + c.feeAmount;
+                w.amountOut += c.amountOut;
+                w.feeTotal += c.feeAmount;
+                w.sqrtEnd = c.sqrtNext;
+                w.endIndex = i;
+                _creditFee(id, b.minBin + int24(int256(i)), c.feeAmount, true);
+                if (w.remaining == 0 || i == 0) break;
                 unchecked {
                     --i;
                 }
             }
         } else {
-            for (uint256 i = active; i <= last; ++i) {
-                _swapStep(id, w, bins[i], i);
-                if (w.remaining == 0) break;
+            uint256 last = bins.length - 1;
+            for (uint256 i = active; i <= last;) {
+                SwapMath.CoreStep memory c = _coreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, false);
+                w.remaining -= c.amountIn + c.feeAmount;
+                w.amountOut += c.amountOut;
+                w.feeTotal += c.feeAmount;
+                w.sqrtEnd = c.sqrtNext;
+                w.endIndex = i;
+                _creditFee(id, b.minBin + int24(int256(i)), c.feeAmount, false);
+                if (w.remaining == 0 || i == last) break;
+                unchecked {
+                    ++i;
+                }
             }
         }
 
         if (w.remaining > 0) revert SwapMath.InsufficientLiquidity();
-        if (w.wroteFee && w.feeTotal > w.credited) {
-            _creditFee(id, w.lastFeeBin, w.feeTotal - w.credited, zeroForOne);
-        }
         _lastSwapFee[id] = w.feeTotal;
         _commitSwap(id, w.sqrtEnd, w.endIndex);
         amountOut = w.amountOut;
     }
 
-    function _swapStep(PoolId id, SwapWalk memory w, SwapMath.Bin memory bin, uint256 i) internal {
-        Book storage b = books[id];
-        SwapMath.Step memory step = SwapMath.swapExactInSingle(bin, w.sqrtEnd, w.remaining, w.zeroForOne);
-        w.amountOut += step.amountOut;
-        w.remaining -= step.amountInUsed;
-        w.sqrtEnd = step.sqrtEnd;
-        w.endIndex = i;
-        if (step.amountInUsed == 0 || w.amountInNet == 0) return;
-        int24 idx = b.minBin + int24(int256(i));
-        uint256 feeI = w.feeTotal * step.amountInUsed / w.amountInNet;
-        _creditFee(id, idx, feeI, w.zeroForOne);
-        w.credited += feeI;
-        w.lastFeeBin = idx;
-        w.wroteFee = true;
+    /// @dev Box computeSwapStep's tuple into one memory slot (stack-too-deep hygiene).
+    function _coreStep(SwapMath.Bin memory bin, uint160 sqrtP, uint256 remaining, uint24 feePips, bool zeroForOne)
+        private
+        pure
+        returns (SwapMath.CoreStep memory c)
+    {
+        (c.sqrtNext, c.amountIn, c.amountOut, c.feeAmount) =
+            SwapMath.computeSwapStep(bin, sqrtP, -int256(remaining), feePips, zeroForOne);
     }
 
     function _commitSwap(PoolId id, uint160 sqrtEnd, uint256 endIndex) internal {
