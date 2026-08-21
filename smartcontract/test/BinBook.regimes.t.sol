@@ -71,25 +71,25 @@ contract BinBookRegimesTest is BaseTest {
         poolManager.initialize(live.key, Constants.SQRT_PRICE_1_1);
         live.hook.setBinSize(live.key, r.binSize);
 
-        live.hook
-            .addLiquidity(
-                BaseCustomAccounting.AddLiquidityParams({
-                    amount0Desired: 100 ether,
-                    amount1Desired: 100 ether,
-                    amount0Min: 0,
-                    amount1Min: 0,
-                    deadline: block.timestamp,
-                    tickLower: 0,
-                    tickUpper: 0,
-                    userInputSalt: bytes32(0)
-                })
-            );
+        live.hook.addLiquidity(
+            live.key,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 100 ether,
+                amount1Desired: 100 ether,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: 0,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
     }
 
     function _priceMoveBps(Live memory live, uint256 amountIn, bool zeroForOne) internal returns (uint256) {
-        uint256 p0 = uint256(live.hook.currentSqrtPriceX96());
+        uint256 p0 = uint256(live.hook.currentSqrtPriceX96(live.id));
         swapRouter.swapExactTokensForTokens(amountIn, 0, zeroForOne, live.key, "", address(this), block.timestamp);
-        uint256 p1 = uint256(live.hook.currentSqrtPriceX96());
+        uint256 p1 = uint256(live.hook.currentSqrtPriceX96(live.id));
         uint256 hi = p0 > p1 ? p0 : p1;
         uint256 lo = p0 > p1 ? p1 : p0;
         // sqrtP move ≈ half of price move; report |Δsqrt|/sqrt * 10000
@@ -99,25 +99,25 @@ contract BinBookRegimesTest is BaseTest {
     function test_stable_seedsLinearDecayAndSwaps() public {
         Live memory live = _deploy(stable, 1);
         _assertBook(live);
-        uint160 p0 = live.hook.currentSqrtPriceX96();
+        uint160 p0 = live.hook.currentSqrtPriceX96(live.id);
         swapRouter.swapExactTokensForTokens(1 ether, 0, false, live.key, "", address(this), block.timestamp);
-        assertGt(live.hook.currentSqrtPriceX96(), p0);
+        assertGt(live.hook.currentSqrtPriceX96(live.id), p0);
     }
 
     function test_mid_seedsLinearDecayAndSwaps() public {
         Live memory live = _deploy(mid, 2);
         _assertBook(live);
-        uint160 p0 = live.hook.currentSqrtPriceX96();
+        uint160 p0 = live.hook.currentSqrtPriceX96(live.id);
         swapRouter.swapExactTokensForTokens(1 ether, 0, false, live.key, "", address(this), block.timestamp);
-        assertGt(live.hook.currentSqrtPriceX96(), p0);
+        assertGt(live.hook.currentSqrtPriceX96(live.id), p0);
     }
 
     function test_meme_seedsLinearDecayAndSwaps() public {
         Live memory live = _deploy(meme, 3);
         _assertBook(live);
-        uint160 p0 = live.hook.currentSqrtPriceX96();
+        uint160 p0 = live.hook.currentSqrtPriceX96(live.id);
         swapRouter.swapExactTokensForTokens(1 ether, 0, false, live.key, "", address(this), block.timestamp);
-        assertGt(live.hook.currentSqrtPriceX96(), p0);
+        assertGt(live.hook.currentSqrtPriceX96(live.id), p0);
     }
 
     function test_allRegimes_sameBlockReverseWalksBack() public {
@@ -151,17 +151,17 @@ contract BinBookRegimesTest is BaseTest {
         Live memory m = _deploy(mid, 14);
         Live memory h = _deploy(meme, 15);
 
-        uint160 ps = s.hook.currentSqrtPriceX96();
-        uint160 pm = m.hook.currentSqrtPriceX96();
-        uint160 ph = h.hook.currentSqrtPriceX96();
+        uint160 ps = s.hook.currentSqrtPriceX96(s.id);
+        uint160 pm = m.hook.currentSqrtPriceX96(m.id);
+        uint160 ph = h.hook.currentSqrtPriceX96(h.id);
 
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, s.key, "", address(this), block.timestamp);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, m.key, "", address(this), block.timestamp);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, h.key, "", address(this), block.timestamp);
 
-        assertLt(s.hook.currentSqrtPriceX96(), ps);
-        assertLt(m.hook.currentSqrtPriceX96(), pm);
-        assertLt(h.hook.currentSqrtPriceX96(), ph);
+        assertLt(s.hook.currentSqrtPriceX96(s.id), ps);
+        assertLt(m.hook.currentSqrtPriceX96(m.id), pm);
+        assertLt(h.hook.currentSqrtPriceX96(h.id), ph);
     }
 
     function test_linearDecay_allRegimes_nearSpotDeeper() public {
@@ -173,23 +173,23 @@ contract BinBookRegimesTest is BaseTest {
     function _assertBook(Live memory live) internal view {
         assertTrue(live.hook.isConfigured(live.id));
         assertGt(live.hook.getTotalShares(live.id), 0);
-        assertGt(live.hook.liquidity(live.hook.currentBin()), 0);
-        assertEq(live.hook.currentSqrtPriceX96(), Constants.SQRT_PRICE_1_1);
+        assertGt(live.hook.liquidity(live.id, live.hook.currentBin(live.id)), 0);
+        assertEq(live.hook.currentSqrtPriceX96(live.id), Constants.SQRT_PRICE_1_1);
     }
 
     function _assertDecay(Live memory live) internal view {
-        int24 cur = live.hook.currentBin();
-        assertGt(live.hook.liquidity(cur), live.hook.liquidity(cur + 4));
-        assertGt(live.hook.liquidity(cur + 4), live.hook.liquidity(cur + 8));
-        assertEq(live.hook.liquidity(cur + 9), 0);
+        int24 cur = live.hook.currentBin(live.id);
+        assertGt(live.hook.liquidity(live.id, cur), live.hook.liquidity(live.id, cur + 4));
+        assertGt(live.hook.liquidity(live.id, cur + 4), live.hook.liquidity(live.id, cur + 8));
+        assertEq(live.hook.liquidity(live.id, cur + 9), 0);
     }
 
     function _assertRoundTrip(Live memory live, uint256 clip) internal {
-        uint160 p0 = live.hook.currentSqrtPriceX96();
+        uint160 p0 = live.hook.currentSqrtPriceX96(live.id);
         swapRouter.swapExactTokensForTokens(clip, 0, false, live.key, "", address(this), block.timestamp);
-        uint160 p1 = live.hook.currentSqrtPriceX96();
+        uint160 p1 = live.hook.currentSqrtPriceX96(live.id);
         assertGt(p1, p0);
         swapRouter.swapExactTokensForTokens(clip, 0, true, live.key, "", address(this), block.timestamp);
-        assertLt(live.hook.currentSqrtPriceX96(), p1);
+        assertLt(live.hook.currentSqrtPriceX96(live.id), p1);
     }
 }

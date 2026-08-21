@@ -2,3 +2,6 @@
 smartcontract/research/metric-core/
 metric-core/
 research/
+
+# forge-installed nested dep shim (symlink), vendored deps are tracked as plain files
+smartcontract/lib/uniswap-hooks/lib/v4-periphery/lib/v4-core
