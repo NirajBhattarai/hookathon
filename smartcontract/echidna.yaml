@@ -1,10 +1,10 @@
-# Echidna configuration for BinRatchet
+# Echidna configuration for BinBook
 #
 # Local (no fork, pure bin-math properties):
-#   echidna . --contract BinRatchetMathFuzz --config echidna.yaml
+#   echidna . --contract BinBookMathFuzz --config echidna.yaml
 #
 # Forked mainnet (invariants against real Uniswap v4 pools):
-#   echidna . --contract BinRatchetForkFuzz --config echidna.yaml \
+#   echidna . --contract BinBookForkFuzz --config echidna.yaml \
 #       --fork-url https://eth-mainnet.example.com/v2/YOUR_KEY --fork-block 25600000
 #   (or uncomment forkUrl/forkBlock below)
 

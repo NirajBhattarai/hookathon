@@ -13,10 +13,10 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
-import {BinRatchet} from "../src/BinRatchet.sol";
+import {BinBook} from "../src/BinBook.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
-contract BinRatchetTest is BaseTest {
+contract BinBookTest is BaseTest {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -28,7 +28,7 @@ contract BinRatchetTest is BaseTest {
     Currency currency0;
     Currency currency1;
     PoolKey poolKey;
-    BinRatchet hook;
+    BinBook hook;
     PoolId poolId;
 
     function setUp() public {
@@ -36,8 +36,8 @@ contract BinRatchetTest is BaseTest {
         (currency0, currency1) = deployCurrencyPair();
 
         address flags = address(uint160(HOOK_FLAGS));
-        deployCodeTo("BinRatchet.sol:BinRatchet", abi.encode(poolManager), flags);
-        hook = BinRatchet(flags);
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags);
+        hook = BinBook(flags);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolId = poolKey.toId();
@@ -55,6 +55,7 @@ contract BinRatchetTest is BaseTest {
 
     function _addRange(uint256 a0, uint256 a1, int24 tickLower, int24 tickUpper) internal returns (BalanceDelta delta) {
         delta = hook.addLiquidity(
+            poolKey,
             BaseCustomAccounting.AddLiquidityParams({
                 amount0Desired: a0,
                 amount1Desired: a1,
@@ -80,7 +81,6 @@ contract BinRatchetTest is BaseTest {
         Hooks.Permissions memory p = hook.getHookPermissions();
         assertTrue(p.beforeInitialize && p.afterInitialize && p.beforeAddLiquidity);
         assertTrue(p.beforeRemoveLiquidity && p.beforeSwap && p.beforeSwapReturnDelta);
-        assertFalse(hook.RATCHET_ENABLED());
         assertEq(hook.DEFAULT_RAMP(), 10);
         assertEq(hook.DEFAULT_BINS_PER_SIDE(), 10);
     }
@@ -91,7 +91,7 @@ contract BinRatchetTest is BaseTest {
 
     function test_setBinSize_succeeds() public {
         vm.expectEmit(address(hook));
-        emit BinRatchet.BinSizeSet(poolId, address(this), 60);
+        emit BinBook.BinSizeSet(poolId, address(this), 60);
         hook.setBinSize(poolKey, 60);
         assertEq(hook.getBinSize(poolId), 60);
         assertTrue(hook.isConfigured(poolId));
@@ -104,18 +104,18 @@ contract BinRatchetTest is BaseTest {
 
     function test_setBinSize_reverts() public {
         vm.prank(address(0xBEEF));
-        vm.expectRevert(BinRatchet.NotPoolCreator.selector);
+        vm.expectRevert(BinBook.NotPoolCreator.selector);
         hook.setBinSize(poolKey, 60);
 
-        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
         hook.setBinSize(poolKey, 0);
-        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
         hook.setBinSize(poolKey, -10);
-        vm.expectRevert(BinRatchet.InvalidBinSize.selector);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
         hook.setBinSize(poolKey, 2001);
 
         hook.setBinSize(poolKey, 60);
-        vm.expectRevert(BinRatchet.BinSizeAlreadySet.selector);
+        vm.expectRevert(BinBook.BinSizeAlreadySet.selector);
         hook.setBinSize(poolKey, 120);
     }
 
@@ -123,8 +123,8 @@ contract BinRatchetTest is BaseTest {
         hook.setBinSize(poolKey, 60);
         (Currency c0, Currency c1) = deployCurrencyPair();
         address flags2 = address(uint160(HOOK_FLAGS) | (uint160(1) << 20));
-        deployCodeTo("BinRatchet.sol:BinRatchet", abi.encode(poolManager), flags2);
-        BinRatchet hook2 = BinRatchet(flags2);
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags2);
+        BinBook hook2 = BinBook(flags2);
         PoolKey memory key2 = PoolKey(c0, c1, 3000, 60, IHooks(address(hook2)));
         poolManager.initialize(key2, Constants.SQRT_PRICE_1_1);
         hook2.setBinSize(key2, 200);
@@ -145,23 +145,23 @@ contract BinRatchetTest is BaseTest {
 
     function test_addLiquidity_reverts_notConfigured() public {
         _approve();
-        vm.expectRevert(BinRatchet.PoolNotConfigured.selector);
+        vm.expectRevert(BinBook.PoolNotConfigured.selector);
         _add(1 ether, 1 ether);
     }
 
     function test_addLiquidity_reverts_zero() public {
         hook.setBinSize(poolKey, 60);
         _approve();
-        vm.expectRevert(BinRatchet.ZeroAmounts.selector);
+        vm.expectRevert(BinBook.ZeroAmounts.selector);
         _add(0, 0);
     }
 
     function test_addLiquidity_secondDeposit_increasesL() public {
         _seed();
-        int24 cur = hook.currentBin();
-        uint128 l1 = hook.liquidity(cur);
+        int24 cur = hook.currentBin(poolId);
+        uint128 l1 = hook.liquidity(poolId, cur);
         _add(50 ether, 50 ether);
-        assertGt(hook.liquidity(cur), l1);
+        assertGt(hook.liquidity(poolId, cur), l1);
     }
 
     function test_addLiquidity_twoUsers() public {
@@ -181,12 +181,38 @@ contract BinRatchetTest is BaseTest {
         assertGt(hook.getShares(poolId, user2), 0);
     }
 
-    function test_removeLiquidity_reverts() public {
+    function test_removeLiquidity_basic() public {
         _seed();
-        vm.expectRevert(BinRatchet.RemovalNotSupported.selector);
+        uint256 sharesBefore = hook.getShares(poolId, address(this));
+        uint256 supplyBefore = hook.getTotalShares(poolId);
+        MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
+        MockERC20 t1 = MockERC20(Currency.unwrap(currency1));
+        uint256 bal0 = t0.balanceOf(address(this));
+        uint256 bal1 = t1.balanceOf(address(this));
+
         hook.removeLiquidity(
+            poolKey,
             BaseCustomAccounting.RemoveLiquidityParams({
-                liquidity: 1,
+                liquidity: sharesBefore / 2,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: 0,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
+
+        assertEq(hook.getShares(poolId, address(this)), sharesBefore - sharesBefore / 2);
+        assertEq(hook.getTotalShares(poolId), supplyBefore - sharesBefore / 2);
+        assertGt(t0.balanceOf(address(this)), bal0);
+        assertGt(t1.balanceOf(address(this)), bal1);
+
+        vm.expectRevert(BinBook.InsufficientShares.selector);
+        hook.removeLiquidity(
+            poolKey,
+            BaseCustomAccounting.RemoveLiquidityParams({
+                liquidity: sharesBefore + 1,
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
@@ -199,47 +225,47 @@ contract BinRatchetTest is BaseTest {
 
     function test_linearDecay_onBook() public {
         _seed();
-        int24 cur = hook.currentBin();
-        uint128 L0 = hook.liquidity(cur);
-        uint128 L1 = hook.liquidity(cur + 1);
+        int24 cur = hook.currentBin(poolId);
+        uint128 L0 = hook.liquidity(poolId, cur);
+        uint128 L1 = hook.liquidity(poolId, cur + 1);
         assertGt(L0, L1);
         assertApproxEqAbs(uint256(L1) * 9, uint256(L0) * 8, 100);
-        assertEq(hook.liquidity(cur + 9), 0);
+        assertEq(hook.liquidity(poolId, cur + 9), 0);
     }
 
     function test_addLiquidity_range_expandsBookBelow() public {
         _seed();
-        int24 cur = hook.currentBin();
-        int24 minBefore = hook.minBin();
-        uint128 spotL = hook.liquidity(cur);
+        int24 cur = hook.currentBin(poolId);
+        int24 minBefore = hook.minBin(poolId);
+        uint128 spotL = hook.liquidity(poolId, cur);
 
         // 15 bins fully below spot: [-30, -15) * binSize, all token1.
         int24 lo = (cur - 30) * 60;
         int24 hi = (cur - 15) * 60;
         _addRange(0, 50 ether, lo, hi);
 
-        assertLt(hook.minBin(), minBefore);
-        assertEq(hook.minBin(), cur - 30);
-        assertEq(hook.liquidity(cur), spotL);
-        assertGt(hook.liquidity(cur - 16), 0);
-        assertGt(hook.liquidity(cur - 30), 0);
-        assertEq(hook.liquidity(cur - 14), 0);
+        assertLt(hook.minBin(poolId), minBefore);
+        assertEq(hook.minBin(poolId), cur - 30);
+        assertEq(hook.liquidity(poolId, cur), spotL);
+        assertGt(hook.liquidity(poolId, cur - 16), 0);
+        assertGt(hook.liquidity(poolId, cur - 30), 0);
+        assertEq(hook.liquidity(poolId, cur - 14), 0);
     }
 
     function test_addLiquidity_range_expandsBookAbove() public {
         _seed();
-        int24 cur = hook.currentBin();
-        int24 maxBefore = hook.maxBin();
+        int24 cur = hook.currentBin(poolId);
+        int24 maxBefore = hook.maxBin(poolId);
 
         int24 lo = (cur + 12) * 60;
         int24 hi = (cur + 22) * 60;
         _addRange(50 ether, 0, lo, hi);
 
-        assertGt(hook.maxBin(), maxBefore);
-        assertEq(hook.maxBin(), cur + 21);
-        assertGt(hook.liquidity(cur + 12), 0);
-        assertGt(hook.liquidity(cur + 21), 0);
-        assertEq(hook.liquidity(cur + 11), 0);
+        assertGt(hook.maxBin(poolId), maxBefore);
+        assertEq(hook.maxBin(poolId), cur + 21);
+        assertGt(hook.liquidity(poolId, cur + 12), 0);
+        assertGt(hook.liquidity(poolId, cur + 21), 0);
+        assertEq(hook.liquidity(poolId, cur + 11), 0);
     }
 
     function test_addLiquidity_range_closerGetsMoreL() public {
@@ -247,34 +273,34 @@ contract BinRatchetTest is BaseTest {
         _approve();
         int24 cur = 0;
         _addRange(0, 100 ether, (cur - 25) * 60, (cur - 15) * 60);
-        assertGt(hook.liquidity(cur - 16), hook.liquidity(cur - 25));
+        assertGt(hook.liquidity(poolId, cur - 16), hook.liquidity(poolId, cur - 25));
     }
 
     function test_addLiquidity_range_farBinsGetL() public {
         _seed();
-        int24 cur = hook.currentBin();
+        int24 cur = hook.currentBin(poolId);
         // Default ramp is 10, so distance 20 used to be L = 0.
         // tickUpper is exclusive, so (cur-19)*60 fills through bin cur-20.
         _addRange(0, 20 ether, (cur - 25) * 60, (cur - 19) * 60);
-        assertGt(hook.liquidity(cur - 20), 0);
-        assertGt(hook.liquidity(cur - 25), 0);
+        assertGt(hook.liquidity(poolId, cur - 20), 0);
+        assertGt(hook.liquidity(poolId, cur - 25), 0);
     }
 
     function test_addLiquidity_range_firstDepositIncludesSpotWindow() public {
         hook.setBinSize(poolKey, 60);
         _approve();
         _addRange(0, 50 ether, -30 * 60, -15 * 60);
-        assertEq(hook.minBin(), -30);
-        assertEq(hook.maxBin(), 9);
-        assertEq(hook.currentBin(), 0);
-        assertEq(hook.liquidity(0), 0);
-        assertGt(hook.liquidity(-16), 0);
+        assertEq(hook.minBin(poolId), -30);
+        assertEq(hook.maxBin(poolId), 9);
+        assertEq(hook.currentBin(poolId), 0);
+        assertEq(hook.liquidity(poolId, 0), 0);
+        assertGt(hook.liquidity(poolId, -16), 0);
     }
 
     function test_addLiquidity_range_reverts_misaligned() public {
         hook.setBinSize(poolKey, 60);
         _approve();
-        vm.expectRevert(BinRatchet.TicksNotAlignedToBins.selector);
+        vm.expectRevert(BinBook.TicksNotAlignedToBins.selector);
         _addRange(0, 1 ether, -181, -60);
     }
 
@@ -282,7 +308,7 @@ contract BinRatchetTest is BaseTest {
         hook.setBinSize(poolKey, 60);
         _approve();
         // 257 bins of size 60
-        vm.expectRevert(BinRatchet.TooManyBins.selector);
+        vm.expectRevert(BinBook.TooManyBins.selector);
         _addRange(0, 1 ether, -257 * 60, 0);
     }
 
@@ -298,10 +324,10 @@ contract BinRatchetTest is BaseTest {
         hook.setBinSize(poolKey, 60);
         _approve();
         _addRange(0, 200 ether, -25 * 60, -15 * 60);
-        uint160 before = hook.currentSqrtPriceX96();
+        uint160 before = hook.currentSqrtPriceX96(poolId);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
-        assertLt(hook.currentSqrtPriceX96(), before);
-        assertLt(hook.currentBin(), 0);
+        assertLt(hook.currentSqrtPriceX96(poolId), before);
+        assertLt(hook.currentBin(poolId), 0);
     }
 
     // ── swap ─────────────────────────────────────────────────────────────
@@ -314,34 +340,34 @@ contract BinRatchetTest is BaseTest {
 
     function test_swap_exactIn_movesPrice() public {
         _seed();
-        uint160 before = hook.currentSqrtPriceX96();
+        uint160 before = hook.currentSqrtPriceX96(poolId);
         swapRouter.swapExactTokensForTokens(0.1 ether, 0, false, poolKey, "", address(this), block.timestamp);
-        assertGt(hook.currentSqrtPriceX96(), before);
+        assertGt(hook.currentSqrtPriceX96(poolId), before);
     }
 
     function test_swap_token0In_lowersPrice() public {
         _seed();
-        uint160 before = hook.currentSqrtPriceX96();
+        uint160 before = hook.currentSqrtPriceX96(poolId);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
-        assertLt(hook.currentSqrtPriceX96(), before);
+        assertLt(hook.currentSqrtPriceX96(poolId), before);
     }
 
     function test_swap_doesNotChangeL() public {
         _seed();
-        int24 cur = hook.currentBin();
-        uint128 lBefore = hook.liquidity(cur);
+        int24 cur = hook.currentBin(poolId);
+        uint128 lBefore = hook.liquidity(poolId, cur);
         swapRouter.swapExactTokensForTokens(1 ether, 0, false, poolKey, "", address(this), block.timestamp);
-        assertEq(hook.liquidity(cur), lBefore);
+        assertEq(hook.liquidity(poolId, cur), lBefore);
     }
 
     function test_swap_sameBlock_reverseWalksBack() public {
         _seed();
-        uint160 start = hook.currentSqrtPriceX96();
+        uint160 start = hook.currentSqrtPriceX96(poolId);
         swapRouter.swapExactTokensForTokens(5 ether, 0, false, poolKey, "", address(this), block.timestamp);
-        uint160 afterUp = hook.currentSqrtPriceX96();
+        uint160 afterUp = hook.currentSqrtPriceX96(poolId);
         assertGt(afterUp, start);
         swapRouter.swapExactTokensForTokens(5 ether, 0, true, poolKey, "", address(this), block.timestamp);
-        assertLt(hook.currentSqrtPriceX96(), afterUp);
+        assertLt(hook.currentSqrtPriceX96(poolId), afterUp);
     }
 
     // ── fee shares ───────────────────────────────────────────────────────
@@ -367,14 +393,14 @@ contract BinRatchetTest is BaseTest {
         _addRange(0, 50 ether, -20 * 60, -5 * 60);
 
         int24 bin = -6;
-        uint128 lAlice = hook.liquidityOf(address(this), bin);
-        uint128 lBob = hook.liquidityOf(bob, bin);
+        uint128 lAlice = hook.liquidityOf(poolId, address(this), bin);
+        uint128 lBob = hook.liquidityOf(poolId, bob, bin);
         assertApproxEqAbs(uint256(lAlice), uint256(lBob) * 2, 2);
 
         swapRouter.swapExactTokensForTokens(2 ether, 0, true, poolKey, "", address(this), block.timestamp);
 
-        (uint256 a0,) = hook.pendingFees(address(this));
-        (uint256 b0,) = hook.pendingFees(bob);
+        (uint256 a0,) = hook.pendingFees(poolId, address(this));
+        (uint256 b0,) = hook.pendingFees(poolId, bob);
         assertGt(a0, 0);
         assertGt(b0, 0);
         assertApproxEqRel(a0, b0 * 2, 0.02e18);
@@ -390,8 +416,8 @@ contract BinRatchetTest is BaseTest {
 
         swapRouter.swapExactTokensForTokens(0.2 ether, 0, true, poolKey, "", address(this), block.timestamp);
 
-        (uint256 a0,) = hook.pendingFees(address(this));
-        (uint256 b0,) = hook.pendingFees(bob);
+        (uint256 a0,) = hook.pendingFees(poolId, address(this));
+        (uint256 b0,) = hook.pendingFees(poolId, bob);
         assertEq(a0, 0);
         assertGt(b0, 0);
     }
@@ -402,17 +428,17 @@ contract BinRatchetTest is BaseTest {
         _addRange(0, 100 ether, -20 * 60, -5 * 60);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
 
-        (uint256 pending0,) = hook.pendingFees(address(this));
+        (uint256 pending0,) = hook.pendingFees(poolId, address(this));
         assertGt(pending0, 0);
 
         MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
         uint256 before = t0.balanceOf(address(this));
-        (uint256 got0, uint256 got1) = hook.collectFees();
+        (uint256 got0, uint256 got1) = hook.collectFees(poolKey);
         assertEq(got0, pending0);
         assertEq(got1, 0);
         assertEq(t0.balanceOf(address(this)), before + got0);
 
-        (uint256 after0,) = hook.pendingFees(address(this));
+        (uint256 after0,) = hook.pendingFees(poolId, address(this));
         assertEq(after0, 0);
     }
 
@@ -425,15 +451,15 @@ contract BinRatchetTest is BaseTest {
         _addRange(0, 100 ether, -20 * 60, 0);
 
         int24 overlap = -16;
-        assertGt(hook.liquidityOf(address(this), overlap), 0);
-        assertGt(hook.liquidityOf(bob, overlap), 0);
-        assertEq(hook.liquidityOf(address(this), -2), 0);
-        assertGt(hook.liquidityOf(bob, -2), 0);
+        assertGt(hook.liquidityOf(poolId, address(this), overlap), 0);
+        assertGt(hook.liquidityOf(poolId, bob, overlap), 0);
+        assertEq(hook.liquidityOf(poolId, address(this), -2), 0);
+        assertGt(hook.liquidityOf(poolId, bob, -2), 0);
 
         swapRouter.swapExactTokensForTokens(3 ether, 0, true, poolKey, "", address(this), block.timestamp);
 
-        (uint256 a0,) = hook.pendingFees(address(this));
-        (uint256 b0,) = hook.pendingFees(bob);
+        (uint256 a0,) = hook.pendingFees(poolId, address(this));
+        (uint256 b0,) = hook.pendingFees(poolId, bob);
         assertGt(b0, a0);
         assertGt(a0 + b0, 0);
     }
@@ -443,11 +469,11 @@ contract BinRatchetTest is BaseTest {
         _approve();
         _addRange(0, 50 ether, -20 * 60, -5 * 60);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
-        (uint256 pending0,) = hook.pendingFees(address(this));
+        (uint256 pending0,) = hook.pendingFees(poolId, address(this));
         _addRange(0, 50 ether, -20 * 60, -5 * 60);
-        (uint256 still,) = hook.pendingFees(address(this));
+        (uint256 still,) = hook.pendingFees(poolId, address(this));
         assertApproxEqAbs(still, pending0, 1);
-        (uint256 got0,) = hook.collectFees();
+        (uint256 got0,) = hook.collectFees(poolKey);
         assertApproxEqAbs(got0, pending0, 1);
     }
 }
