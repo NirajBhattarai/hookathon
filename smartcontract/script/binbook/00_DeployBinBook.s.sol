@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {console2} from "forge-std/Script.sol";
+
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+
+import {BinBook} from "../../src/BinBook.sol";
+import {BinBookBase} from "./BinBookBase.s.sol";
+
+/// @notice Deploys tokens + the BinBook hook (mined flags via canonical CREATE2 factory),
+///         initializes the pool against the official Sepolia PoolManager, and saves the
+///         deployment to deployments/<chainid>.json for downstream scripts.
+contract DeployBinBook is BinBookBase {
+    function run() external {
+        address broadcaster = vm.getWallets()[0];
+
+        vm.startBroadcast();
+
+        MockERC20 tA = new MockERC20("Token A", "TKA", 18);
+        MockERC20 tB = new MockERC20("Token B", "TKB", 18);
+        (Currency c0, Currency c1) = address(tA) < address(tB)
+            ? (Currency.wrap(address(tA)), Currency.wrap(address(tB)))
+            : (Currency.wrap(address(tB)), Currency.wrap(address(tA)));
+        tA.mint(broadcaster, 1_000_000e18);
+        tB.mint(broadcaster, 1_000_000e18);
+
+        uint160 flags = uint160(
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+        );
+        bytes memory hookInit = abi.encodePacked(type(BinBook).creationCode, abi.encode(POOL_MANAGER));
+        (address hookAddr, bytes32 salt) =
+            HookMiner.find(CREATE2_FACTORY, flags, type(BinBook).creationCode, abi.encode(POOL_MANAGER));
+        (bool ok,) = CREATE2_FACTORY.call(abi.encodePacked(salt, hookInit));
+        require(ok, "hook deploy failed");
+        BinBook binBook = BinBook(hookAddr);
+
+        PoolKey memory key =
+            PoolKey({currency0: c0, currency1: c1, fee: POOL_FEE, tickSpacing: TICK_SPACING, hooks: IHooks(hookAddr)});
+        POOL_MANAGER.initialize(key, 2 ** 96);
+
+        vm.stopBroadcast();
+
+        saveDeployment(
+            Deployment({
+                binBook: hookAddr,
+                token0: Currency.unwrap(c0),
+                token1: Currency.unwrap(c1),
+                fee: POOL_FEE,
+                tickSpacing: TICK_SPACING
+            })
+        );
+
+        console2.log("chainId      :", block.chainid);
+        console2.log("broadcaster  :", broadcaster);
+        console2.log("poolManager  :", address(POOL_MANAGER));
+        console2.log("swapRouter   :", SWAP_ROUTER);
+        console2.log("token0       :", Currency.unwrap(c0));
+        console2.log("token1       :", Currency.unwrap(c1));
+        console2.log("binBook      :", hookAddr);
+        console2.logBytes32(keccak256(abi.encode(key)));
+        console2.log("^^ poolId");
+    }
+}
