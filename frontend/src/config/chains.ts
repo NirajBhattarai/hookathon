@@ -2,13 +2,14 @@ import { defineChain, type Address, type Chain } from 'viem'
 import { mainnet, sepolia } from '@reown/appkit/networks'
 import type { AppKitNetwork } from '@reown/appkit/networks'
 
-export type SupportedChainId = 1 | 11155111 | 31337
+export type SupportedChainId = 1 | 11155111
 
 export type ChainDeployment = {
   chainId: SupportedChainId
   binBook: Address
   poolManager: Address
   swapRouter: Address
+  quoter: Address
   token0: Address
   token1: Address
   poolFee: number
@@ -18,31 +19,41 @@ export type ChainDeployment = {
 
 const ZERO = '0x0000000000000000000000000000000000000000' as Address
 
-function env(key: string): string | undefined {
-  const v = process.env[key]
-  return v && v.length > 0 ? v : undefined
+// NOTE: process.env must be accessed via STATIC member expressions so Next.js
+// inlines the values into the client bundle. Dynamic access (process.env[key])
+// silently yields undefined in the browser.
+type ChainEnv = Partial<Omit<ChainDeployment, 'chainId' | 'rpcUrl' | 'poolFee' | 'tickSpacing'>> & {
+  rpcUrl?: string
+  /** Raw env strings — converted via envInt(). */
+  poolFee?: string
+  tickSpacing?: string
 }
 
-function envAddress(key: string): Address {
-  return (env(key) as Address | undefined) ?? ZERO
+function envAddress(value: string | undefined): Address {
+  return value && value.length > 0 ? (value as Address) : ZERO
 }
 
-function envInt(key: string, fallback: number): number {
-  const raw = env(key)
-  if (!raw) return fallback
-  const n = Number(raw)
+function envInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback
+  const n = Number(value)
   return Number.isFinite(n) ? n : fallback
 }
 
-/** Local Anvil — overridable via NEXT_PUBLIC_RPC_URL_31337 */
-export const anvil = defineChain({
-  id: 31337,
-  name: 'Anvil',
-  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-  rpcUrls: {
-    default: { http: [env('NEXT_PUBLIC_RPC_URL_31337') ?? 'http://127.0.0.1:8545'] },
+/** Static NEXT_PUBLIC_* values, inlined at build time. */
+const CHAIN_ENV: Record<SupportedChainId, ChainEnv> = {
+  1: {},
+  11155111: {
+    rpcUrl: process.env.NEXT_PUBLIC_RPC_URL_11155111,
+    binBook: process.env.NEXT_PUBLIC_BINBOOK_11155111 as Address | undefined,
+    poolManager: process.env.NEXT_PUBLIC_POOL_MANAGER_11155111 as Address | undefined,
+    swapRouter: process.env.NEXT_PUBLIC_SWAP_ROUTER_11155111 as Address | undefined,
+    quoter: process.env.NEXT_PUBLIC_QUOTER_11155111 as Address | undefined,
+    token0: process.env.NEXT_PUBLIC_TOKEN0_11155111 as Address | undefined,
+    token1: process.env.NEXT_PUBLIC_TOKEN1_11155111 as Address | undefined,
+    poolFee: process.env.NEXT_PUBLIC_POOL_FEE_11155111,
+    tickSpacing: process.env.NEXT_PUBLIC_TICK_SPACING_11155111,
   },
-})
+}
 
 /**
  * Registry of chains the app knows about.
@@ -55,20 +66,19 @@ export const CHAIN_BY_ID: Record<SupportedChainId, AppKitNetwork> = {
     rpcUrls: {
       ...sepolia.rpcUrls,
       default: {
-        http: [env('NEXT_PUBLIC_RPC_URL_11155111') ?? sepolia.rpcUrls.default.http[0]!],
+        http: [process.env.NEXT_PUBLIC_RPC_URL_11155111 ?? sepolia.rpcUrls.default.http[0]!],
       },
     },
   },
-  31337: anvil,
 }
 
 function parseEnabledIds(): SupportedChainId[] {
-  const raw = env('NEXT_PUBLIC_ENABLED_CHAINS') ?? '31337,11155111'
+  const raw = process.env.NEXT_PUBLIC_ENABLED_CHAINS ?? '11155111'
   const ids = raw
     .split(',')
     .map((s) => Number(s.trim()))
-    .filter((id): id is SupportedChainId => id === 1 || id === 11155111 || id === 31337)
-  return ids.length > 0 ? ids : [31337]
+    .filter((id): id is SupportedChainId => id === 1 || id === 11155111)
+  return ids.length > 0 ? ids : [11155111]
 }
 
 export const enabledChainIds = parseEnabledIds()
@@ -79,7 +89,7 @@ export const networks = enabledChainIds.map((id) => CHAIN_BY_ID[id]) as [
 ]
 
 export const defaultChainId = ((): SupportedChainId => {
-  const raw = Number(env('NEXT_PUBLIC_DEFAULT_CHAIN_ID') ?? enabledChainIds[0])
+  const raw = Number(process.env.NEXT_PUBLIC_DEFAULT_CHAIN_ID ?? enabledChainIds[0])
   if (enabledChainIds.includes(raw as SupportedChainId)) return raw as SupportedChainId
   return enabledChainIds[0]!
 })()
@@ -91,16 +101,18 @@ export function deploymentFor(chainId: number): ChainDeployment {
   if (!(id in CHAIN_BY_ID)) {
     throw new Error(`Unsupported chain ${chainId}`)
   }
+  const env = CHAIN_ENV[id] ?? {}
   return {
     chainId: id,
-    binBook: envAddress(`NEXT_PUBLIC_BINBOOK_${chainId}`),
-    poolManager: envAddress(`NEXT_PUBLIC_POOL_MANAGER_${chainId}`),
-    swapRouter: envAddress(`NEXT_PUBLIC_SWAP_ROUTER_${chainId}`),
-    token0: envAddress(`NEXT_PUBLIC_TOKEN0_${chainId}`),
-    token1: envAddress(`NEXT_PUBLIC_TOKEN1_${chainId}`),
-    poolFee: envInt(`NEXT_PUBLIC_POOL_FEE_${chainId}`, 3000),
-    tickSpacing: envInt(`NEXT_PUBLIC_TICK_SPACING_${chainId}`, 60),
-    rpcUrl: env(`NEXT_PUBLIC_RPC_URL_${chainId}`),
+    binBook: envAddress(env.binBook),
+    poolManager: envAddress(env.poolManager),
+    swapRouter: envAddress(env.swapRouter),
+    quoter: envAddress(env.quoter),
+    token0: envAddress(env.token0),
+    token1: envAddress(env.token1),
+    poolFee: envInt(env.poolFee, 3000),
+    tickSpacing: envInt(env.tickSpacing, 60),
+    rpcUrl: env.rpcUrl,
   }
 }
 

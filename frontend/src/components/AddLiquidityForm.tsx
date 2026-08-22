@@ -25,9 +25,8 @@ type Preset = 'spot' | 'custom'
 
 export function AddLiquidityForm() {
   const { address, isConnected } = useAccount()
-  const { deployment, ready } = useDeployment()
+  const { deployment } = useDeployment()
   const { key } = usePool()
-  const preview = !ready
   const [amount0, setAmount0] = useState('1')
   const [amount1, setAmount1] = useState('1')
   const [tickLower, setTickLower] = useState('0')
@@ -48,10 +47,6 @@ export function AddLiquidityForm() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
-    if (preview) {
-      setStatus('Preview mode — add BinBook + token addresses to submit.')
-      return
-    }
     if (!deployment || !address || !key) return
     setStatus(null)
     try {
@@ -97,13 +92,11 @@ export function AddLiquidityForm() {
     }
   }
 
-  const cta = preview
-    ? 'Preview add liquidity'
-    : !isConnected
-      ? 'Connect wallet'
-      : isPending || confirming
-        ? 'Confirm in wallet…'
-        : 'Add liquidity'
+  const cta = !isConnected
+    ? 'Connect wallet'
+    : isPending || confirming
+      ? 'Confirm in wallet…'
+      : 'Add liquidity'
 
   return (
     <div className="trade-layout">
@@ -111,12 +104,7 @@ export function AddLiquidityForm() {
         <h1 className="page-title">Add liquidity</h1>
         <p className="page-sub">Deposit into the bin book. Near-spot uses the default ramp window.</p>
 
-        <form className={preview ? 'form-card preview' : 'form-card'} onSubmit={onSubmit}>
-          {preview && (
-            <div style={{ marginBottom: '0.75rem' }}>
-              <span className="badge">Preview</span>
-            </div>
-          )}
+        <form className="form-card" onSubmit={onSubmit}>
 
           <div className="form-grid">
             <div>
@@ -185,20 +173,12 @@ export function AddLiquidityForm() {
             <button
               type="submit"
               className="cta"
-              disabled={!preview && (isPending || confirming)}
+              disabled={isPending || confirming}
             >
               {cta}
             </button>
 
             {status && <p className="status">{status}</p>}
-            {preview && (
-              <p className="preview-note">UI only until BinBook + tokens are configured.</p>
-            )}
-            {!preview && deployment && (
-              <p className="preview-note">
-                Hook {(deployment.binBook as Address).slice(0, 10)}…
-              </p>
-            )}
           </div>
         </form>
       </div>

@@ -7,6 +7,7 @@ const links = [
   { href: '/', label: 'Swap' },
   { href: '/liquidity', label: 'Liquidity' },
   { href: '/portfolio', label: 'Portfolio' },
+  { href: '/faucet', label: 'Faucet' },
 ]
 
 export function Header() {

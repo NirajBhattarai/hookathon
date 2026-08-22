@@ -248,7 +248,7 @@ export function CreatePoolForm() {
             <div className="form-grid">
               <div className="field">
                 <label>Pair</label>
-                <p className="preview-note" style={{ margin: 0 }}>
+                <p className="muted tiny" style={{ margin: 0 }}>
                   {label0} / {label1} · fee {(deployment?.poolFee ?? 3000) / 10000}% · tick spacing{' '}
                   {deployment?.tickSpacing ?? 60}
                 </p>
