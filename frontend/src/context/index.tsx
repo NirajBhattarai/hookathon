@@ -1,10 +1,10 @@
-'use client'
+"use client";
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { createAppKit } from '@reown/appkit/react'
-import { type ReactNode, useState } from 'react'
-import { cookieToInitialState, WagmiProvider, type Config } from 'wagmi'
-import { defaultNetwork, metadata, networks, projectId, wagmiAdapter } from '@/config'
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createAppKit } from "@reown/appkit/react";
+import { type ReactNode, useState } from "react";
+import { cookieToInitialState, WagmiProvider, type Config } from "wagmi";
+import { defaultNetwork, metadata, networks, projectId, wagmiAdapter } from "@/config";
 
 createAppKit({
   adapters: [wagmiAdapter],
@@ -15,22 +15,22 @@ createAppKit({
   features: {
     analytics: false,
   },
-  themeMode: 'dark',
-})
+  themeMode: "dark",
+});
 
 export function ContextProvider({
   children,
   cookies,
 }: {
-  children: ReactNode
-  cookies: string | null
+  children: ReactNode;
+  cookies: string | null;
 }) {
-  const [queryClient] = useState(() => new QueryClient())
-  const initialState = cookieToInitialState(wagmiAdapter.wagmiConfig as Config, cookies)
+  const [queryClient] = useState(() => new QueryClient());
+  const initialState = cookieToInitialState(wagmiAdapter.wagmiConfig as Config, cookies);
 
   return (
     <WagmiProvider config={wagmiAdapter.wagmiConfig as Config} initialState={initialState}>
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     </WagmiProvider>
-  )
+  );
 }

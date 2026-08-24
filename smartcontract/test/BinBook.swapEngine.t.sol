@@ -44,7 +44,7 @@ contract BinBookSwapEngineTest is BaseTest {
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolId = poolKey.toId();
-        poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
+        hook.createPool(poolKey, Constants.SQRT_PRICE_1_1, 60);
     }
 
     function _approve() internal {
@@ -73,7 +73,6 @@ contract BinBookSwapEngineTest is BaseTest {
     }
 
     function _seed() internal {
-        hook.setBinSize(poolKey, 60);
         _approve();
         _add(100 ether, 100 ether);
     }
@@ -164,7 +163,6 @@ contract BinBookSwapEngineTest is BaseTest {
     }
 
     function test_swap_throughEmptyGap_matchesLibrarySimulation() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         // First add fills ONLY [-25,-16]; bins [-15,-1] and spot stay empty.
         _addRange(0, 200 ether, -25 * 60, -15 * 60);
@@ -187,7 +185,6 @@ contract BinBookSwapEngineTest is BaseTest {
     }
 
     function test_swap_revertsWhenBookTooThin() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         _add(0.001 ether, 0.001 ether);
 
@@ -245,8 +242,7 @@ contract BinBookSwapEngineTest is BaseTest {
         (Currency c0b, Currency c1b) = deployCurrencyPair();
         PoolKey memory keyB = PoolKey(c0b, c1b, 3000, 60, IHooks(address(hook)));
         PoolId idB = keyB.toId();
-        poolManager.initialize(keyB, Constants.SQRT_PRICE_1_1);
-        hook.setBinSize(keyB, 120);
+        hook.createPool(keyB, Constants.SQRT_PRICE_1_1, 120);
         MockERC20(Currency.unwrap(c0b)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(c1b)).approve(address(hook), type(uint256).max);
         hook.addLiquidity(

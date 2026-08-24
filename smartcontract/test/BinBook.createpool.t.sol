@@ -9,7 +9,9 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Pool} from "@uniswap/v4-core/src/libraries/Pool.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
 import {BinBook} from "../src/BinBook.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
@@ -124,9 +126,9 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,,,, bool configured,) = hook.books(id);
+        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
-        assertTrue(configured);
+        assertFalse(seeded);
         assertTrue(hook.initializedPools(id));
     }
 
@@ -147,9 +149,9 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,,,, bool configured,) = hook.books(id);
+        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
-        assertTrue(configured);
+        assertFalse(seeded);
         assertTrue(hook.initializedPools(id));
     }
 
@@ -162,9 +164,42 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, sqrtPriceX96, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,,,, bool configured,) = hook.books(id);
+        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
-        assertTrue(configured);
+        assertFalse(seeded);
         assertTrue(hook.initializedPools(id));
+    }
+
+    function testFuzz_createPool_poolCreatorAttribution(address caller) public {
+        vm.assume(caller != address(0));
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+
+        vm.prank(caller);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 100);
+
+        assertEq(hook.poolCreator(key.toId()), caller);
+    }
+
+    function test_directInitialize_alwaysReverts_gatewayIsPermanent() public {
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+        PoolId id = key.toId();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.afterInitialize.selector,
+                abi.encodeWithSelector(BinBook.InitializeViaCreatePool.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+
+        // Nothing registered: the failed initialize rolled back entirely.
+        assertFalse(hook.initializedPools(id));
+        assertEq(hook.poolCreator(id), address(0));
+        assertFalse(hook.initializedPools(key.toId()));
     }
 }

@@ -53,8 +53,7 @@ contract BinBookSandwichTest is BaseTest {
         t1.approve(address(swapRouter), type(uint256).max);
 
         live.key = PoolKey(live.c0, live.c1, fee, tickSpacing, IHooks(address(live.hook)));
-        poolManager.initialize(live.key, Constants.SQRT_PRICE_1_1);
-        live.hook.setBinSize(live.key, binSize);
+        live.hook.createPool(live.key, Constants.SQRT_PRICE_1_1, binSize);
 
         uint256 b0 = t0.balanceOf(address(this));
         uint256 b1 = t1.balanceOf(address(this));

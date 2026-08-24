@@ -60,8 +60,7 @@ contract MemeLaunch is BinBookBase {
             hooks: IHooks(address(book))
         });
         int24 startTick = -200320; // ≈ 2e-9
-        POOL_MANAGER.initialize(key, TickMath.getSqrtPriceAtTick(startTick));
-        book.setBinSize(key, TICK_SPACING);
+        book.createPool(key, TickMath.getSqrtPriceAtTick(startTick), TICK_SPACING);
 
         // --- Approvals ---
         IERC20(address(weth)).approve(address(book), type(uint256).max);

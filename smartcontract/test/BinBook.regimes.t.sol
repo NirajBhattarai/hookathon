@@ -39,6 +39,7 @@ contract BinBookRegimesTest is BaseTest {
         PoolId id;
         Currency c0;
         Currency c1;
+        int24 binSize;
     }
 
     Regime internal stable;
@@ -68,8 +69,8 @@ contract BinBookRegimesTest is BaseTest {
 
         live.key = PoolKey(live.c0, live.c1, r.fee, r.tickSpacing, IHooks(address(live.hook)));
         live.id = live.key.toId();
-        poolManager.initialize(live.key, Constants.SQRT_PRICE_1_1);
-        live.hook.setBinSize(live.key, r.binSize);
+        live.hook.createPool(live.key, Constants.SQRT_PRICE_1_1, r.binSize);
+        live.binSize = r.binSize;
 
         live.hook
             .addLiquidity(
@@ -172,7 +173,7 @@ contract BinBookRegimesTest is BaseTest {
     }
 
     function _assertBook(Live memory live) internal view {
-        assertTrue(live.hook.isConfigured(live.id));
+        assertEq(live.hook.getBinSize(live.id), live.binSize);
         assertGt(live.hook.getTotalShares(live.id), 0);
         assertGt(live.hook.liquidity(live.id, live.hook.currentBin(live.id)), 0);
         assertEq(live.hook.currentSqrtPriceX96(live.id), Constants.SQRT_PRICE_1_1);

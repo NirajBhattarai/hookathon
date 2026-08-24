@@ -47,10 +47,8 @@ contract SeedFreshPool is BinBookBase {
 
         vm.startBroadcast();
 
-        POOL_MANAGER.initialize(key, sqrtP);
-
-        if (!binBook.isConfigured(key.toId()) || binBook.getBinSize(key.toId()) == 0) {
-            binBook.setBinSize(key, ts);
+        if (binBook.getBinSize(key.toId()) == 0) {
+            binBook.createPool(key, sqrtP, ts);
         }
 
         IERC20(d.token0).approve(d.binBook, type(uint256).max);

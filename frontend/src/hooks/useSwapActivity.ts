@@ -1,46 +1,46 @@
-'use client'
+"use client";
 
-import { useQuery } from '@tanstack/react-query'
-import { usePublicClient } from 'wagmi'
-import { fetchSwapLogs, type SwapEvent } from '@/lib/activity'
-import { useDeployment } from './useDeployment'
-import { usePool } from './usePool'
+import { useQuery } from "@tanstack/react-query";
+import { usePublicClient } from "wagmi";
+import { fetchSwapLogs, type SwapEvent } from "@/lib/activity";
+import { useDeployment } from "./useDeployment";
+import { usePool } from "./usePool";
 
-export type Timeframe = '1H' | '1D' | '1W' | 'ALL'
+export type Timeframe = "1H" | "1D" | "1W" | "ALL";
 
 /** Sepolia is ~12s/block. ALL is capped, not literally all history, to bound RPC cost. */
 const BLOCK_WINDOW: Record<Timeframe, bigint> = {
-  '1H': 300n,
-  '1D': 7_200n,
-  '1W': 50_400n,
+  "1H": 300n,
+  "1D": 7_200n,
+  "1W": 50_400n,
   ALL: 100_000n,
-}
+};
 
 export function useSwapActivity(timeframe: Timeframe) {
-  const { deployment, ready } = useDeployment()
-  const { poolId } = usePool()
-  const client = usePublicClient({ chainId: deployment?.chainId })
+  const { deployment, ready } = useDeployment();
+  const { poolId } = usePool();
+  const client = usePublicClient({ chainId: deployment?.chainId });
 
-  const enabled = ready && !!deployment && !!poolId && !!client
+  const enabled = ready && !!deployment && !!poolId && !!client;
 
   const query = useQuery({
-    queryKey: ['swap-activity', deployment?.chainId, deployment?.poolManager, poolId, timeframe],
+    queryKey: ["swap-activity", deployment?.chainId, deployment?.poolManager, poolId, timeframe],
     enabled,
     staleTime: 15_000,
     refetchInterval: 30_000,
     queryFn: async (): Promise<SwapEvent[]> => {
-      const c = client!
-      const latest = await c.getBlockNumber()
-      const window = BLOCK_WINDOW[timeframe]
-      const fromBlock = latest > window ? latest - window : 0n
+      const c = client!;
+      const latest = await c.getBlockNumber();
+      const window = BLOCK_WINDOW[timeframe];
+      const fromBlock = latest > window ? latest - window : 0n;
       return fetchSwapLogs(c, {
         poolManager: deployment!.poolManager,
         poolId: poolId!,
         fromBlock,
         toBlock: latest,
-      })
+      });
     },
-  })
+  });
 
   return {
     events: query.data ?? [],
@@ -49,5 +49,5 @@ export function useSwapActivity(timeframe: Timeframe) {
     error: query.error,
     refetch: query.refetch,
     enabled,
-  }
+  };
 }
