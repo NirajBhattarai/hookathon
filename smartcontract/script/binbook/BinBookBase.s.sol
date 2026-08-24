@@ -45,7 +45,7 @@ abstract contract BinBookBase is Script {
             vm.toString(d.fee),
             ',"tickSpacing":',
             vm.toString(int256(d.tickSpacing)),
-            '}'
+            "}"
         );
         vm.writeJson(obj, deployPath());
     }

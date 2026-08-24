@@ -79,11 +79,7 @@ contract BinBookSwapEngineTest is BaseTest {
     }
 
     /// @dev Rebuild the on-chain book from public views so the library walker can simulate it.
-    function _simulate()
-        internal
-        view
-        returns (SwapMath.Bin[] memory bins, uint256 active, uint160 sqrtP)
-    {
+    function _simulate() internal view returns (SwapMath.Bin[] memory bins, uint256 active, uint160 sqrtP) {
         int24 lo = hook.minBin(poolId);
         int24 hi = hook.maxBin(poolId);
         int24 size = hook.getBinSize(poolId);

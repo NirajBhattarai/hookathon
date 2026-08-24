@@ -15,6 +15,7 @@ import {BinBookBase} from "./BinBookBase.s.sol";
 /// @notice Adds full-range liquidity to the deployed pool and prints resulting shares.
 contract AddLiquidity is BinBookBase {
     using PoolIdLibrary for PoolKey;
+
     function run() external {
         Deployment memory d = loadDeployment();
         BinBook binBook = BinBook(d.binBook);

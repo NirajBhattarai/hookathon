@@ -213,7 +213,7 @@ library SwapMath {
                     // input suffices to reach the bin boundary: cap the step there
                     sqrtPriceNextX96 = target;
                     feeAmount = _feePips == MAX_SWAP_FEE
-                        ? amountIn // amountIn is always 0 here, as amountRemainingLessFee == 0
+                        ? amountIn  // amountIn is always 0 here, as amountRemainingLessFee == 0
                         : FullMath.mulDivRoundingUp(amountIn, _feePips, MAX_SWAP_FEE - _feePips);
                 } else {
                     // exhaust the remaining amount inside the bin
@@ -268,13 +268,7 @@ library SwapMath {
     )
         internal
         pure
-        returns (
-            uint256 amountOut,
-            uint256 amountInUsed,
-            uint256 feeAmount,
-            uint160 sqrtEnd,
-            uint256 endIndex
-        )
+        returns (uint256 amountOut, uint256 amountInUsed, uint256 feeAmount, uint160 sqrtEnd, uint256 endIndex)
     {
         if (bins.length == 0 || amountIn == 0) {
             return (0, 0, 0, sqrtP, active);

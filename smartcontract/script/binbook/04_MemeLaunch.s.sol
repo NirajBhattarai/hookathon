@@ -127,7 +127,7 @@ contract MemeLaunch is BinBookBase {
             vm.toString(POOL_FEE),
             ',"tickSpacing":',
             vm.toString(int256(TICK_SPACING)),
-            '}'
+            "}"
         );
         vm.writeJson(obj, string.concat("deployments/", vm.toString(block.chainid), "-meme.json"));
         PoolId id = key.toId();
@@ -149,28 +149,30 @@ contract MemeLaunch is BinBookBase {
     }
 
     function _buy(uint256 wethIn, string memory tag) internal {
-        IUniswapV4Router04(payable(SWAP_ROUTER)).swapExactTokensForTokens({
-            amountIn: wethIn,
-            amountOutMin: 0,
-            zeroForOne: _isWeth0(),
-            poolKey: key,
-            hookData: "",
-            receiver: trader,
-            deadline: block.timestamp + 600
-        });
+        IUniswapV4Router04(payable(SWAP_ROUTER))
+            .swapExactTokensForTokens({
+                amountIn: wethIn,
+                amountOutMin: 0,
+                zeroForOne: _isWeth0(),
+                poolKey: key,
+                hookData: "",
+                receiver: trader,
+                deadline: block.timestamp + 600
+            });
         _log(tag, wethIn);
     }
 
     function _sell(uint256 binuIn, string memory tag) internal {
-        IUniswapV4Router04(payable(SWAP_ROUTER)).swapExactTokensForTokens({
-            amountIn: binuIn,
-            amountOutMin: 0,
-            zeroForOne: !_isWeth0(),
-            poolKey: key,
-            hookData: "",
-            receiver: trader,
-            deadline: block.timestamp + 600
-        });
+        IUniswapV4Router04(payable(SWAP_ROUTER))
+            .swapExactTokensForTokens({
+                amountIn: binuIn,
+                amountOutMin: 0,
+                zeroForOne: !_isWeth0(),
+                poolKey: key,
+                hookData: "",
+                receiver: trader,
+                deadline: block.timestamp + 600
+            });
         _log(tag, binuIn);
     }
 
@@ -181,7 +183,7 @@ contract MemeLaunch is BinBookBase {
         uint256 px96 = FullMath.mulDiv(sp, sp, 2 ** 96); // token1 per token0, 2^96 scale
         bool wethIs0 = _isWeth0();
         uint256 priceE18 = wethIs0
-            ? FullMath.mulDiv(2 ** 96, 1e18, px96) // BINU is token1 -> weth per binu = 1/px
+            ? FullMath.mulDiv(2 ** 96, 1e18, px96)  // BINU is token1 -> weth per binu = 1/px
             : FullMath.mulDiv(px96, 1e18, 2 ** 96);
         console2.log(tag, amt);
         console2.log("  ethPerBinu(1e18):", priceE18);

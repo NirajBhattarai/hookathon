@@ -41,9 +41,7 @@ contract QuoteDebug is Test {
                 BinQuoter.QuoteParams({key: key, zeroForOne: true, amountIn: 1e6, receiver: trader})
             )
         );
-        try q.quoteExactInput(
-            BinQuoter.QuoteParams({key: key, zeroForOne: true, amountIn: 1e6, receiver: trader})
-        ) {
+        try q.quoteExactInput(BinQuoter.QuoteParams({key: key, zeroForOne: true, amountIn: 1e6, receiver: trader})) {
             console2.log("quoter: no revert?!");
         } catch (bytes memory reason) {
             console2.log("quoter revert bytes:");

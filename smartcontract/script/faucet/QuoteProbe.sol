@@ -20,7 +20,8 @@ contract QuoteProbe {
     event Inner(bytes reason);
 
     function probe(address quoter, QP calldata p) external {
-        try IBinQuoter(quoter).quoteExactInput(p) {} catch (bytes memory reason) {
+        try IBinQuoter(quoter).quoteExactInput(p) {}
+        catch (bytes memory reason) {
             emit Inner(reason);
         }
     }

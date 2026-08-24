@@ -36,15 +36,16 @@ contract Swap is BinBookBase {
         tokenIn.approve(address(PERMIT2), type(uint256).max);
         tokenIn.approve(SWAP_ROUTER, type(uint256).max);
 
-        IUniswapV4Router04(payable(SWAP_ROUTER)).swapExactTokensForTokens({
-            amountIn: amountIn,
-            amountOutMin: 0,
-            zeroForOne: zeroForOne,
-            poolKey: key,
-            hookData: "",
-            receiver: broadcaster,
-            deadline: block.timestamp + 600
-        });
+        IUniswapV4Router04(payable(SWAP_ROUTER))
+            .swapExactTokensForTokens({
+                amountIn: amountIn,
+                amountOutMin: 0,
+                zeroForOne: zeroForOne,
+                poolKey: key,
+                hookData: "",
+                receiver: broadcaster,
+                deadline: block.timestamp + 600
+            });
 
         vm.stopBroadcast();
 

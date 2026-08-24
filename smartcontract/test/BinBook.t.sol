@@ -4,12 +4,14 @@ pragma solidity ^0.8.26;
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
@@ -130,6 +132,108 @@ contract BinBookTest is BaseTest {
         hook2.setBinSize(key2, 200);
         assertEq(hook.getBinSize(poolId), 60);
         assertEq(hook2.getBinSize(key2.toId()), 200);
+    }
+
+    // ── createPool gateway ───────────────────────────────────────────────
+
+    function _altKey(uint24 fee) internal view returns (PoolKey memory) {
+        return PoolKey(currency0, currency1, fee, 60, IHooks(address(hook)));
+    }
+
+    function test_createPool_succeeds() public {
+        PoolKey memory key2 = _altKey(500);
+        PoolId id2 = key2.toId();
+
+        vm.expectEmit(address(hook));
+        emit BinBook.BinSizeSet(id2, address(this), 120);
+        vm.expectEmit(address(hook));
+        emit BinBook.PoolCreated(id2, address(this), key2, 120);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 120);
+
+        assertEq(hook.poolCreator(id2), address(this));
+        assertEq(hook.getBinSize(id2), 120);
+        assertTrue(hook.isConfigured(id2));
+        assertTrue(hook.initializedPools(id2));
+        assertEq(hook.currentSqrtPriceX96(id2), Constants.SQRT_PRICE_1_1);
+    }
+
+    function test_createPool_thenAddLiquidity_works() public {
+        PoolKey memory key2 = _altKey(500);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+
+        _approve();
+        hook.addLiquidity(
+            key2,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 100 ether,
+                amount1Desired: 100 ether,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: 0,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
+        assertGt(hook.getTotalShares(key2.toId()), 0);
+    }
+
+    function test_createPool_reverts_invalidBinSize() public {
+        PoolKey memory key2 = _altKey(500);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 0);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, -10);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 2001);
+    }
+
+    function test_createPool_reverts_unsortedCurrencies() public {
+        PoolKey memory bad = PoolKey(currency1, currency0, 500, 60, IHooks(address(hook)));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPoolManager.CurrenciesOutOfOrderOrEqual.selector,
+                Currency.unwrap(currency1),
+                Currency.unwrap(currency0)
+            )
+        );
+        hook.createPool(bad, Constants.SQRT_PRICE_1_1, 60);
+    }
+
+    function test_createPool_reverts_alreadyInitialized() public {
+        PoolKey memory key2 = _altKey(500);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+        vm.expectRevert();
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+    }
+
+    function test_gateway_on_blocksDirectInitialize() public {
+        hook.setGatewayRequired(true);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.afterInitialize.selector,
+                abi.encodeWithSelector(BinBook.InitializeViaCreatePool.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        poolManager.initialize(_altKey(700), Constants.SQRT_PRICE_1_1);
+
+        PoolKey memory key2 = _altKey(500);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+        assertTrue(hook.isConfigured(key2.toId()));
+    }
+
+    function test_setGateway_ownerOnly() public {
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(BinBook.Unauthorized.selector);
+        hook.setGatewayRequired(true);
+        assertFalse(hook.requireGateway());
+
+        hook.setGatewayRequired(true);
+        assertTrue(hook.requireGateway());
     }
 
     // ── liquidity ────────────────────────────────────────────────────────
@@ -328,6 +432,85 @@ contract BinBookTest is BaseTest {
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
         assertLt(hook.currentSqrtPriceX96(poolId), before);
         assertLt(hook.currentBin(poolId), 0);
+    }
+
+    // ── user ramp (addLiquidityWithRamp) ─────────────────────────────────
+
+    function _rampParams(uint256 a0, uint256 a1, int24 tickLower, int24 tickUpper)
+        internal
+        view
+        returns (BaseCustomAccounting.AddLiquidityParams memory)
+    {
+        return BaseCustomAccounting.AddLiquidityParams({
+            amount0Desired: a0,
+            amount1Desired: a1,
+            amount0Min: 0,
+            amount1Min: 0,
+            deadline: block.timestamp,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            userInputSalt: bytes32(0)
+        });
+    }
+
+    function test_ramp_customRange_exactMinimumDistribution() public {
+        hook.setBinSize(poolKey, 60);
+        _approve();
+        // Bins [-5..4], cur = 0: distances below = |idx|, above = idx + 1 → farthest 5, min ramp 6.
+        hook.addLiquidityWithRamp(poolKey, _rampParams(100 ether, 100 ether, -5 * 60, 5 * 60), 6);
+
+        uint128 lBelow1 = hook.liquidity(poolId, -1);
+        uint128 lSpot = hook.liquidity(poolId, 0);
+        uint128 lBelow2 = hook.liquidity(poolId, -2);
+        uint128 lAbove3 = hook.liquidity(poolId, 3);
+
+        // ramp 6: L_i ∝ (6 - d) / 6 → d=1 bins tie at 5/6, d=2 gets 4/6, d=4 gets 2/6.
+        assertEq(lBelow1, lSpot);
+        assertEq(uint256(lBelow2) * 5, uint256(lBelow1) * 4);
+        assertEq(uint256(lAbove3) * 5, uint256(lSpot) * 2);
+        for (int24 i = -5; i <= 4; ++i) {
+            assertGt(hook.liquidity(poolId, i), 0);
+        }
+    }
+
+    function test_ramp_customRange_reverts_belowMinimum() public {
+        hook.setBinSize(poolKey, 60);
+        _approve();
+        vm.expectRevert(abi.encodeWithSelector(BinBook.InvalidRamp.selector, uint256(6)));
+        hook.addLiquidityWithRamp(poolKey, _rampParams(100 ether, 100 ether, -5 * 60, 5 * 60), 5);
+        assertEq(hook.getTotalShares(poolId), 0);
+        assertEq(hook.liquidity(poolId, 0), 0);
+    }
+
+    function test_ramp_zero_reverts() public {
+        hook.setBinSize(poolKey, 60);
+        _approve();
+        vm.expectRevert(abi.encodeWithSelector(BinBook.InvalidRamp.selector, uint256(0)));
+        hook.addLiquidityWithRamp(poolKey, _rampParams(100 ether, 100 ether, 0, 0), 0);
+    }
+
+    function test_ramp_defaultWindow_flatterThanLegacy() public {
+        hook.setBinSize(poolKey, 60);
+        _approve();
+        PoolKey memory keyB = _altKey(500);
+        hook.createPool(keyB, Constants.SQRT_PRICE_1_1, 60);
+
+        hook.addLiquidityWithRamp(poolKey, _rampParams(50 ether, 50 ether, 0, 0), 25);
+        hook.addLiquidityWithRamp(keyB, _rampParams(50 ether, 50 ether, 0, 0), 10);
+
+        // Seeded window spans cur - 10 .. cur + 9; edge bin sits at distance 10.
+        int24 edge = hook.currentBin(poolId) - 10;
+        assertGt(hook.liquidity(poolId, edge), 0);
+        assertEq(hook.liquidity(keyB.toId(), edge), 0);
+    }
+
+    function test_ramp_legacyPath_stillFloorsAtDefaultRamp() public {
+        hook.setBinSize(poolKey, 60);
+        _approve();
+        // Narrow range needs only ramp 4, but the no-ramp path keeps the DEFAULT_RAMP = 10 floor.
+        _addRange(100 ether, 100 ether, -3 * 60, 3 * 60);
+        assertEq(hook.liquidity(poolId, -1), hook.liquidity(poolId, 0));
+        assertEq(uint256(hook.liquidity(poolId, -3)) * 9, uint256(hook.liquidity(poolId, 0)) * 7);
     }
 
     // ── swap ─────────────────────────────────────────────────────────────

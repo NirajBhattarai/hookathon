@@ -45,6 +45,10 @@ abstract contract Deployers {
         permit2.approve(address(token), address(poolManager), type(uint160).max, type(uint48).max);
     }
 
+    function deployCurrency() internal returns (Currency currency) {
+        currency = Currency.wrap(address(deployToken()));
+    }
+
     function deployCurrencyPair() internal virtual returns (Currency currency0, Currency currency1) {
         MockERC20 token0 = deployToken();
         MockERC20 token1 = deployToken();
