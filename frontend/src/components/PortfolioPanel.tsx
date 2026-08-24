@@ -113,19 +113,19 @@ export function PortfolioPanel() {
             <dl className="stats">
               <div>
                 <dt>Pending fee0</dt>
-                <dd>{fee0 != null ? fee0.toString() : '—'}</dd>
+                <dd className="tabular up">{fee0 != null ? fee0.toString() : '—'}</dd>
               </div>
               <div>
                 <dt>Pending fee1</dt>
-                <dd>{fee1 != null ? fee1.toString() : '—'}</dd>
+                <dd className="tabular up">{fee1 != null ? fee1.toString() : '—'}</dd>
               </div>
               <div>
                 <dt>Shares</dt>
-                <dd>{shareVal != null ? String(shareVal) : '—'}</dd>
+                <dd className="tabular">{shareVal != null ? String(shareVal) : '—'}</dd>
               </div>
               <div>
                 <dt>Pool share</dt>
-                <dd>{sharePct != null ? `${sharePct.toFixed(2)}%` : '—'}</dd>
+                <dd className="tabular">{sharePct != null ? `${sharePct.toFixed(2)}%` : '—'}</dd>
               </div>
             </dl>
 

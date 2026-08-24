@@ -13,6 +13,8 @@
   --accent-ink: #04140c;
   --danger: #f07167;
   --warn: #e6b35a;
+  --up: #3ecf8e;
+  --down: #f07167;
   --radius: 1.25rem;
   --radius-sm: 0.85rem;
   --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
@@ -135,6 +137,224 @@ input {
   .trade-layout {
     grid-template-columns: 1fr;
   }
+}
+
+/* ——— Stats bar ——— */
+.stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1.25rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.stats-bar.preview {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--warn) 40%, var(--line));
+}
+
+.stats-bar-pair {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.stats-bar-metrics {
+  display: flex;
+  gap: 1.75rem;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.stat-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.stat-pill-label {
+  font-size: 0.66rem;
+  color: var(--muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-pill-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.up {
+  color: var(--up);
+}
+
+.down {
+  color: var(--down);
+}
+
+/* ——— Chart-forward trade grid (home page) ——— */
+.trade-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.trade-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.trade-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  position: sticky;
+  top: 5.5rem;
+}
+
+@media (max-width: 980px) {
+  .trade-grid {
+    grid-template-columns: 1fr;
+  }
+  .trade-side {
+    position: static;
+  }
+  .stats-bar-metrics {
+    margin-left: 0;
+  }
+}
+
+.chart-panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.chart-panel.preview {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--warn) 40%, var(--line));
+}
+
+.chart-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.chart-tf-group {
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  background: var(--bg-input);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+
+.chart-tf {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.32rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chart-tf.active {
+  background: var(--bg-elevated);
+  color: var(--ink);
+}
+
+.chart-refresh {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--bg-input);
+  color: var(--muted);
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.6rem;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 1rem;
+}
+
+.chart-refresh:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.chart-canvas-wrap {
+  position: relative;
+}
+
+.chart-canvas {
+  height: 380px;
+  width: 100%;
+}
+
+.chart-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 0 2rem;
+  pointer-events: none;
+}
+
+/* ——— Activity table ——— */
+.activity-table-wrap {
+  overflow-x: auto;
+}
+
+.activity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.activity-table th {
+  text-align: left;
+  color: var(--muted-2);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.activity-table td {
+  padding: 0.55rem 0.6rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 55%, transparent);
+  white-space: nowrap;
+}
+
+.activity-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
 
 .swap-stage {
@@ -451,6 +671,14 @@ input {
 .depth-bar.active {
   background: var(--accent);
   box-shadow: 0 0 12px color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+.depth-bar.buy {
+  background: color-mix(in oklab, var(--up) 32%, var(--bg-input));
+}
+
+.depth-bar.sell {
+  background: color-mix(in oklab, var(--down) 28%, var(--bg-input));
 }
 
 .meta-grid {

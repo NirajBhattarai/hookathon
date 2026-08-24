@@ -5,6 +5,7 @@ import { useReadContract, useReadContracts } from 'wagmi'
 import { binBookAbi } from '@/lib/abi/binBook'
 import { buildDepthSeries } from '@/lib/bins'
 import { DEMO_BOOK, demoDepthSeries } from '@/lib/demo'
+import { tickToPrice } from '@/lib/priceMath'
 import { useDeployment } from '@/hooks/useDeployment'
 import { usePool } from '@/hooks/usePool'
 
@@ -114,11 +115,14 @@ export function BinDepthChart() {
           {series.map((b) => {
             const pct = maxL === 0n ? 0 : Number((b.liquidity * 10000n) / maxL) / 100
             const active = b.binIndex === book.currentBin
+            const side = active ? 'active' : b.binIndex < book.currentBin ? 'sell' : 'buy'
+            const priceLower = tickToPrice(b.tickLower)
+            const priceUpper = tickToPrice(b.tickUpper)
             return (
               <div
                 key={b.binIndex}
-                className={active ? 'depth-bar active' : 'depth-bar'}
-                title={`bin ${b.binIndex}`}
+                className={`depth-bar ${side}`}
+                title={`bin ${b.binIndex} · price ${priceLower.toPrecision(6)}–${priceUpper.toPrecision(6)} · liquidity ${b.liquidity.toString()}`}
                 style={{ height: `${Math.max(pct, b.liquidity > 0n ? 6 : 0)}%` }}
               />
             )

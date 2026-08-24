@@ -1,13 +1,23 @@
+import { ActivityTable } from '@/components/ActivityTable'
 import { BinDepthChart } from '@/components/BinDepthChart'
+import { PriceChart } from '@/components/PriceChart'
+import { StatsBar } from '@/components/StatsBar'
 import { SwapForm } from '@/components/SwapForm'
 
 export default function HomePage() {
   return (
-    <main className="trade-layout">
-      <div className="swap-stage">
-        <SwapForm />
+    <main>
+      <StatsBar />
+      <div className="trade-grid">
+        <div className="trade-main">
+          <PriceChart />
+          <ActivityTable />
+        </div>
+        <div className="trade-side">
+          <SwapForm />
+          <BinDepthChart />
+        </div>
       </div>
-      <BinDepthChart />
     </main>
   )
 }
