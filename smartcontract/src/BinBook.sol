@@ -187,8 +187,8 @@ contract BinBook is BaseCustomCurve {
 
         BinWindow memory w = _windowFor(id, params.tickLower, params.tickUpper);
 
-        uint256 LBase = _previewLBase(id, w, params.amount0Desired, params.amount1Desired);
-        (amount0, amount1) = _applyLBase(id, w, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
+        uint256 LBase = _solveLBase(id, w, params.amount0Desired, params.amount1Desired);
+        (amount0, amount1) = _depositLBase(id, w, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
         shares = amount0 + amount1;
         if (shares == 0) revert ZeroAmounts();
     }
@@ -473,7 +473,11 @@ contract BinBook is BaseCustomCurve {
         }
     }
 
-    function _previewLBase(PoolId id, BinWindow memory w, uint256 amount0Desired, uint256 amount1Desired)
+    /// @dev Read-only solve for the root liquidity `LBase`: probes the window with a unit LBase,
+    ///      sums the token0/token1 it would need per bin (ramp-decayed via `computeLPerBin`), then
+    ///      scales by the caller's desired amounts and takes the smaller of the two scalars so the
+    ///      resulting LBase never exceeds either token budget when later deployed by `_depositLBase`.
+    function _solveLBase(PoolId id, BinWindow memory w, uint256 amount0Desired, uint256 amount1Desired)
         internal
         view
         returns (uint256 LBase)
@@ -502,7 +506,10 @@ contract BinBook is BaseCustomCurve {
         if (LBase == 0) revert ZeroAmounts();
     }
 
-    function _applyLBase(
+    /// @dev State-changing counterpart to `_solveLBase`: expands the book, then walks the same
+    ///      window applying the solved LBase per bin (ramp-decayed) to actually credit user L and
+    ///      total up the real token0/token1 pulled in.
+    function _depositLBase(
         PoolId id,
         BinWindow memory w,
         uint256 LBase,
@@ -599,13 +606,13 @@ contract BinBook is BaseCustomCurve {
     ///      L(bin) = LBase * (ramp - distance) / ramp
     ///      ramp = max(farthestBinDistance + 1, baseRamp)
     ///      The +1 ensures the farthest bin gets a tiny L > 0 (needed for Uniswap v4 tick tracking).
-    function _rampFor(int24 userMinBin, int24 userMaxBin, int24 currentBin, uint16 baseRamp)
+    function _rampFor(int24 userMinBin, int24 userMaxBin, int24 cur, uint16 baseRamp)
         internal
         pure
         returns (uint256 ramp)
     {
-        uint256 distanceBelow = _distance(userMinBin, currentBin);
-        uint256 distanceAbove = _distance(userMaxBin, currentBin);
+        uint256 distanceBelow = _distance(userMinBin, cur);
+        uint256 distanceAbove = _distance(userMaxBin, cur);
         uint256 farthestDistance = distanceBelow > distanceAbove ? distanceBelow : distanceAbove;
         ramp = farthestDistance + 1;
         if (ramp < baseRamp) ramp = baseRamp;

@@ -7,13 +7,16 @@ import { buildDepthSeries, type BinDepth } from "@/lib/bins";
 import { demoDepthSeries } from "@/lib/demo";
 import { useBook } from "./useBook";
 import { useDeployment } from "./useDeployment";
-import { usePool } from "./usePool";
+import { usePool, type PoolPairOverride } from "./usePool";
 
-/** Per-bin liquidity for the active pool's book — real reads live, synthetic series in preview. */
-export function useBinLiquidity() {
+/**
+ * Per-bin liquidity for the active pool's book — real reads live, synthetic series in preview.
+ * Defaults to the deployment's configured pair; pass `pair` to target any other token pair.
+ */
+export function useBinLiquidity(pair?: PoolPairOverride) {
   const { deployment, ready } = useDeployment();
-  const { poolId } = usePool();
-  const { book, preview } = useBook();
+  const { poolId } = usePool(pair);
+  const { book, preview } = useBook(pair);
   const address = deployment?.binBook;
 
   const indexes = useMemo(() => {

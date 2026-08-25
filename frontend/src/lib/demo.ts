@@ -1,12 +1,16 @@
-import { buildDepthSeries, type BinDepth } from "@/lib/bins";
+import { buildDepthSeries, DEFAULT_BINS_PER_SIDE, DEFAULT_RAMP, type BinDepth } from "@/lib/bins";
+import { priceToSqrtPriceX96 } from "@/lib/priceMath";
 import type { Candle, VolumeBar, ActivityStats } from "@/lib/priceSeries";
 
 /** Synthetic book used when addresses are unset — UI preview only. */
 export const DEMO_BOOK = {
   binSize: 60,
+  ramp: DEFAULT_RAMP,
+  numBinsPerSide: DEFAULT_BINS_PER_SIDE,
   currentBin: 0,
   minBin: -10,
   maxBin: 9,
+  sqrtPriceX96: priceToSqrtPriceX96(1),
   configured: true,
 } as const;
 

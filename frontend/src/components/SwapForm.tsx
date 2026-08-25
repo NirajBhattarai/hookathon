@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   encodeAbiParameters,
   formatUnits,
@@ -17,7 +17,8 @@ import {
   useWriteContract,
 } from "wagmi";
 import { useDeployment } from "@/hooks/useDeployment";
-import { FAUCET_TOKENS, findToken, tokenByAddress } from "@/lib/tokens";
+import { TokenSelect } from "@/components/TokenSelect";
+import { findToken, tokenByAddress } from "@/lib/tokens";
 
 /**
  * BinQuoter performs the real pool swap inside PoolManager.unlock() and reverts
@@ -180,101 +181,6 @@ const erc20MetaAbi = [
     outputs: [{ type: "bool" }],
   },
 ] as const;
-
-function TokenAvatar({ color, symbol }: { color?: string; symbol: string }) {
-  return (
-    <span
-      className="token-avatar token-avatar-sm"
-      style={color ? { background: color } : undefined}
-    >
-      {symbol.slice(0, 1)}
-    </span>
-  );
-}
-
-function TokenSelect({
-  value,
-  onSelect,
-  disabled,
-}: {
-  value: Address;
-  onSelect: (a: Address) => void;
-  disabled?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-  const current = tokenByAddress(value);
-
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, []);
-
-  const list = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    return FAUCET_TOKENS.filter(
-      (t) => !s || t.symbol.toLowerCase().includes(s) || t.name.toLowerCase().includes(s)
-    );
-  }, [q]);
-
-  return (
-    <div className="tok-select" ref={ref}>
-      <button
-        type="button"
-        className="tok-select-btn"
-        disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-      >
-        <TokenAvatar color={current?.color} symbol={current?.symbol ?? "?"} />
-        <strong>{current?.symbol ?? "Select"}</strong>
-        <span className="tok-caret">▾</span>
-      </button>
-
-      {open && (
-        <div className="tok-menu" role="listbox">
-          <input
-            className="faucet-search tok-search"
-            placeholder="Search token…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            autoFocus
-          />
-          <ul>
-            {list.map((t) => (
-              <li key={t.address}>
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={t.address === value}
-                  className={`tok-row ${t.address === value ? "tok-row-active" : ""}`}
-                  onClick={() => {
-                    onSelect(t.address);
-                    setOpen(false);
-                    setQ("");
-                  }}
-                >
-                  <TokenAvatar color={t.color} symbol={t.symbol} />
-                  <span className="tok-id">
-                    <strong>{t.symbol}</strong>
-                    <span>{t.name}</span>
-                  </span>
-                  <span className="muted tiny">{t.category}</span>
-                </button>
-              </li>
-            ))}
-            {!list.length && <li className="muted tiny tok-empty">No match</li>}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
 
 export function SwapForm() {
   const { address, isConnected } = useAccount();
