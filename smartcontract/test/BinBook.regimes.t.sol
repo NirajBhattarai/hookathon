@@ -81,8 +81,8 @@ contract BinBookRegimesTest is BaseTest {
                     amount0Min: 0,
                     amount1Min: 0,
                     deadline: block.timestamp,
-                    tickLower: 0,
-                    tickUpper: 0,
+                    tickLower: -10 * r.binSize,
+                    tickUpper: 10 * r.binSize,
                     userInputSalt: bytes32(0)
                 })
             );
@@ -183,7 +183,7 @@ contract BinBookRegimesTest is BaseTest {
         int24 cur = live.hook.currentBin(live.id);
         assertGt(live.hook.liquidity(live.id, cur), live.hook.liquidity(live.id, cur + 4));
         assertGt(live.hook.liquidity(live.id, cur + 4), live.hook.liquidity(live.id, cur + 8));
-        assertEq(live.hook.liquidity(live.id, cur + 9), 0);
+        assertEq(live.hook.liquidity(live.id, cur + 10), 0);
     }
 
     function _assertRoundTrip(Live memory live, uint256 clip) internal {

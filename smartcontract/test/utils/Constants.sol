@@ -17,6 +17,12 @@ library Constants {
     uint160 public constant SQRT_PRICE_1010_100 = 251791039410471229173201122529;
     uint160 public constant SQRT_PRICE_10000_100 = 792281625142643375935439503360;
 
+    // Meme coin prices (1 MEME = 1/N ETH → sqrtPriceX96 = sqrt(1/N) * 2^96)
+    uint160 public constant SQRT_PRICE_1_100 = 7922816251426434199159046144; // 1 MEME = 0.01 ETH  (100 MEME/ETH)
+    uint160 public constant SQRT_PRICE_1_1000 = 2505414483750479155158843392; // 1 MEME = 0.001 ETH (1K MEME/ETH)
+    uint160 public constant SQRT_PRICE_1_10000 = 792281625142643392428113920; // 1 MEME = 0.0001 ETH (10K MEME/ETH)
+    uint160 public constant SQRT_PRICE_1_100000 = 250541448375047936131727360; // 1 MEME = 0.00001 ETH (100K MEME/ETH)
+
     uint256 constant MAX_UINT256 = type(uint256).max;
     uint128 constant MAX_UINT128 = type(uint128).max;
     uint160 constant MAX_UINT160 = type(uint160).max;

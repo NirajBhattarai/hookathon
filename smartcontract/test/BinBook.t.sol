@@ -53,7 +53,7 @@ contract BinBookTest is BaseTest {
     }
 
     function _add(uint256 a0, uint256 a1) internal returns (BalanceDelta delta) {
-        return _addRange(a0, a1, 0, 0);
+        return _addRange(a0, a1, -600, 600);
     }
 
     function _addRange(uint256 a0, uint256 a1, int24 tickLower, int24 tickUpper) internal returns (BalanceDelta delta) {
@@ -74,7 +74,7 @@ contract BinBookTest is BaseTest {
 
     function _seed() internal {
         _approve();
-        _add(100 ether, 100 ether);
+        _addRange(100 ether, 100 ether, -600, 600);
     }
 
     // ── permissions / config ─────────────────────────────────────────────
@@ -137,8 +137,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -212,8 +212,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -266,8 +266,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -285,8 +285,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -298,8 +298,9 @@ contract BinBookTest is BaseTest {
         uint128 L0 = hook.liquidity(poolId, cur);
         uint128 L1 = hook.liquidity(poolId, cur + 1);
         assertGt(L0, L1);
-        assertApproxEqAbs(uint256(L1) * 9, uint256(L0) * 8, 100);
-        assertEq(hook.liquidity(poolId, cur + 9), 0);
+        // ramp = farthestDistance + 1 = 11; cur distance=1 (L∝10/11), cur+1 distance=2 (L∝9/11)
+        assertApproxEqAbs(uint256(L1) * 10, uint256(L0) * 9, 100);
+        assertEq(hook.liquidity(poolId, cur + 10), 0);
     }
 
     function test_addLiquidity_range_expandsBookBelow() public {
@@ -372,15 +373,16 @@ contract BinBookTest is BaseTest {
 
     function test_addLiquidity_range_reverts_tooManyBins() public {
         _approve();
-        // 257 bins of size 60
+        // 65 bins of size 60
         vm.expectRevert(BinBook.TooManyBins.selector);
-        _addRange(0, 1 ether, -257 * 60, 0);
+        _addRange(0, 1 ether, -65 * 60, 0);
     }
 
     function test_addLiquidity_range_usdcOnlyWrongSide_reverts() public {
         _approve();
-        // Above spot needs token0; USDC-only (token1) cannot fill it.
+        // Above spot needs token0; providing only token1 (wrong side) reverts.
         vm.expectRevert(SwapMath.InsufficientLiquidity.selector);
+        _addRange(0, 100 ether, 60, 120);
     }
 
     function test_swap_walksEmptyGapToFarBin() public {

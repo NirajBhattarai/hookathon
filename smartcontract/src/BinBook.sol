@@ -81,7 +81,7 @@ contract BinBook is BaseCustomCurve {
     uint16 public constant DEFAULT_RAMP = 10;
     uint16 public constant DEFAULT_BINS_PER_SIDE = 10;
     /// @dev Cap on bins filled in a single add. Far ranges should use a larger `binSize`.
-    uint16 public constant MAX_BINS_PER_ADD = 256;
+    uint16 public constant MAX_BINS_PER_ADD = 64;
     /// @dev Cap on the contiguous book. Swaps load every bin in `[minBin, maxBin]`.
     uint16 public constant MAX_BOOK_BINS = 1024;
 
@@ -186,6 +186,7 @@ contract BinBook is BaseCustomCurve {
         if (params.amount0Desired == 0 && params.amount1Desired == 0) revert ZeroAmounts();
 
         BinWindow memory w = _windowFor(id, params.tickLower, params.tickUpper);
+
         uint256 LBase = _previewLBase(id, w, params.amount0Desired, params.amount1Desired);
         (amount0, amount1) = _applyLBase(id, w, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
         shares = amount0 + amount1;
@@ -566,19 +567,16 @@ contract BinBook is BaseCustomCurve {
         else feeGrowth1X128[id][idx] += delta;
     }
 
-    /// @dev `tickLower >= tickUpper` (including 0,0) keeps the default near-spot window with the book's
-    ///      ramp. Custom ranges auto-floor the ramp at `farthestDistance + 1` so every bin gets funded.
+    /// @dev Resolves the bin window for a given tick range. Custom ranges auto-floor the ramp
+    ///      at `farthestDistance + 1` so every bin gets funded.
     function _windowFor(PoolId id, int24 tickLower, int24 tickUpper) internal view returns (BinWindow memory w) {
-        Book storage b = books[id];
-        (int24 defMin, int24 defMax, int24 cur) = _binRange(id);
-        w.cur = cur;
+        if (tickLower >= tickUpper) revert InvalidTickRange();
 
-        if (tickLower >= tickUpper) {
-            w.minB = defMin;
-            w.maxB = defMax;
-            w.ramp = b.ramp;
-            return w;
-        }
+        Book storage b = books[id];
+        // Resolve current bin: use seeded book state if first addLiquidity already ran,
+        // otherwise derive cur from the pool's starting price.
+        (,, int24 cur) = _binRange(id);
+        w.cur = cur;
 
         int24 size = b.binSize;
         if (tickLower % size != 0 || tickUpper % size != 0) revert TicksNotAlignedToBins();
@@ -596,11 +594,20 @@ contract BinBook is BaseCustomCurve {
         w.ramp = _rampFor(userMin, userMax, cur, b.ramp);
     }
 
-    function _rampFor(int24 minB, int24 maxB, int24 cur, uint16 baseRamp) internal pure returns (uint256 ramp) {
-        uint256 dLo = _distance(minB, cur);
-        uint256 dHi = _distance(maxB, cur);
-        uint256 farthest = dLo > dHi ? dLo : dHi;
-        ramp = farthest + 1;
+    /// @notice Compute the decay radius for a user's addLiquidity range.
+    /// @dev Ramp determines how many bins away from current price L decays to zero.
+    ///      L(bin) = LBase * (ramp - distance) / ramp
+    ///      ramp = max(farthestBinDistance + 1, baseRamp)
+    ///      The +1 ensures the farthest bin gets a tiny L > 0 (needed for Uniswap v4 tick tracking).
+    function _rampFor(int24 userMinBin, int24 userMaxBin, int24 currentBin, uint16 baseRamp)
+        internal
+        pure
+        returns (uint256 ramp)
+    {
+        uint256 distanceBelow = _distance(userMinBin, currentBin);
+        uint256 distanceAbove = _distance(userMaxBin, currentBin);
+        uint256 farthestDistance = distanceBelow > distanceAbove ? distanceBelow : distanceAbove;
+        ramp = farthestDistance + 1;
         if (ramp < baseRamp) ramp = baseRamp;
     }
 
@@ -639,16 +646,35 @@ contract BinBook is BaseCustomCurve {
         if (span > MAX_BOOK_BINS) revert BookTooWide();
     }
 
+    /// @notice Returns the min, max, and current bin indices for a pool.
+    /// @dev Think of it like price buckets for a PEPE/USDC or DOGE/ETH pair.
+    ///      Each "bin" is a fixed price range. The pool sits in the "current" bin,
+    ///      and we extend `numBinsPerSide` bins left (cheaper) and right (deeper)
+    ///      to cover the active liquidity range.
+    ///
+    ///      Example: PEPE/USDC pool at $0.000025, binSize = 100 ticks, 5 bins/side
+    ///        - currentBin = 42  (the bin where the price lands)
+    ///        - minBin    = 37  (5 bins to the left  → cheaper PEPE prices)
+    ///        - maxBin    = 46  (4 bins to the right → more expensive PEPE prices)
+    ///        - So liquidity is spread across bins 37..46, covering a price band
+    ///          around the current USDC-denominated price of PEPE.
+    ///
+    ///      If the book was already seeded by a keeper, we skip the math and
+    ///      just return the stored values (gas savings).
     function _binRange(PoolId id) internal view returns (int24 minB, int24 maxB, int24 cur) {
         Book storage b = books[id];
+        // If already seeded, bins are cached — just return them (saves gas)
         if (b.seeded) {
             return (b.minBin, b.maxBin, b.currentBin);
         }
+        // Convert the pool's sqrtPriceX96 → raw tick (like mapping PEPE/USDC price to a number line)
         int24 tick = TickMath.getTickAtSqrtPrice(b.sqrtPriceX96);
+        // Snap the tick down to the nearest bin index (each bin spans `binSize` ticks)
         cur = _floorDiv(tick, b.binSize);
+        // Spread `numBinsPerSide` bins on each side of current
         int24 n = int24(uint24(b.numBinsPerSide));
-        minB = cur - n;
-        maxB = cur + n - 1;
+        minB = cur - n; // left boundary  (lower prices, e.g. PEPE cheaper per USDC)
+        maxB = cur + n - 1; // right boundary (higher prices, e.g. PEPE pricier per USDC)
     }
 
     function _distance(int24 binIndex, int24 cur) internal pure returns (uint256) {

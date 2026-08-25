@@ -66,8 +66,8 @@ contract BinBookSandwichTest is BaseTest {
                     amount0Min: 0,
                     amount1Min: 0,
                     deadline: block.timestamp,
-                    tickLower: 0,
-                    tickUpper: 0,
+                    tickLower: -10 * binSize,
+                    tickUpper: 10 * binSize,
                     userInputSalt: bytes32(0)
                 })
             );
