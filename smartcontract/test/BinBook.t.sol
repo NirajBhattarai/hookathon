@@ -4,16 +4,19 @@ pragma solidity ^0.8.26;
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
 import {BinBook} from "../src/BinBook.sol";
+import {SwapMath} from "../src/libraries/SwapMath.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
 contract BinBookTest is BaseTest {
@@ -41,7 +44,7 @@ contract BinBookTest is BaseTest {
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolId = poolKey.toId();
-        poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
+        hook.createPool(poolKey, Constants.SQRT_PRICE_1_1, 60);
     }
 
     function _approve() internal {
@@ -70,7 +73,6 @@ contract BinBookTest is BaseTest {
     }
 
     function _seed() internal {
-        hook.setBinSize(poolKey, 60);
         _approve();
         _add(100 ether, 100 ether);
     }
@@ -89,53 +91,109 @@ contract BinBookTest is BaseTest {
         assertEq(hook.poolCreator(poolId), address(this));
     }
 
-    function test_setBinSize_succeeds() public {
-        vm.expectEmit(address(hook));
-        emit BinBook.BinSizeSet(poolId, address(this), 60);
-        hook.setBinSize(poolKey, 60);
-        assertEq(hook.getBinSize(poolId), 60);
-        assertTrue(hook.isConfigured(poolId));
-    }
-
-    function test_setBinSize_bounds() public {
-        hook.setBinSize(poolKey, 1);
-        assertEq(hook.getBinSize(poolId), 1);
-    }
-
-    function test_setBinSize_reverts() public {
-        vm.prank(address(0xBEEF));
-        vm.expectRevert(BinBook.NotPoolCreator.selector);
-        hook.setBinSize(poolKey, 60);
-
-        vm.expectRevert(BinBook.InvalidBinSize.selector);
-        hook.setBinSize(poolKey, 0);
-        vm.expectRevert(BinBook.InvalidBinSize.selector);
-        hook.setBinSize(poolKey, -10);
-        vm.expectRevert(BinBook.InvalidBinSize.selector);
-        hook.setBinSize(poolKey, 2001);
-
-        hook.setBinSize(poolKey, 60);
-        vm.expectRevert(BinBook.BinSizeAlreadySet.selector);
-        hook.setBinSize(poolKey, 120);
-    }
-
     function test_twoHooks_independentConfig() public {
-        hook.setBinSize(poolKey, 60);
         (Currency c0, Currency c1) = deployCurrencyPair();
         address flags2 = address(uint160(HOOK_FLAGS) | (uint160(1) << 20));
         deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags2);
         BinBook hook2 = BinBook(flags2);
         PoolKey memory key2 = PoolKey(c0, c1, 3000, 60, IHooks(address(hook2)));
-        poolManager.initialize(key2, Constants.SQRT_PRICE_1_1);
-        hook2.setBinSize(key2, 200);
+        hook2.createPool(key2, Constants.SQRT_PRICE_1_1, 200);
         assertEq(hook.getBinSize(poolId), 60);
         assertEq(hook2.getBinSize(key2.toId()), 200);
+    }
+
+    // ── createPool gateway ───────────────────────────────────────────────
+
+    function _altKey(uint24 fee) internal view returns (PoolKey memory) {
+        return PoolKey(currency0, currency1, fee, 60, IHooks(address(hook)));
+    }
+
+    function test_createPool_succeeds() public {
+        PoolKey memory key2 = _altKey(500);
+        PoolId id2 = key2.toId();
+
+        vm.expectEmit(address(hook));
+        emit BinBook.BinSizeSet(id2, address(this), 120);
+        vm.expectEmit(address(hook));
+        emit BinBook.PoolCreated(id2, address(this), key2, 120);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 120);
+
+        assertEq(hook.poolCreator(id2), address(this));
+        assertEq(hook.getBinSize(id2), 120);
+        assertTrue(hook.initializedPools(id2));
+        assertEq(hook.currentSqrtPriceX96(id2), Constants.SQRT_PRICE_1_1);
+    }
+
+    function test_createPool_thenAddLiquidity_works() public {
+        PoolKey memory key2 = _altKey(500);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+
+        _approve();
+        hook.addLiquidity(
+            key2,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 100 ether,
+                amount1Desired: 100 ether,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: 0,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
+        assertGt(hook.getTotalShares(key2.toId()), 0);
+    }
+
+    function test_createPool_reverts_invalidBinSize() public {
+        PoolKey memory key2 = _altKey(500);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 0);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, -10);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 2001);
+    }
+
+    function test_createPool_reverts_unsortedCurrencies() public {
+        PoolKey memory bad = PoolKey(currency1, currency0, 500, 60, IHooks(address(hook)));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPoolManager.CurrenciesOutOfOrderOrEqual.selector,
+                Currency.unwrap(currency1),
+                Currency.unwrap(currency0)
+            )
+        );
+        hook.createPool(bad, Constants.SQRT_PRICE_1_1, 60);
+    }
+
+    function test_createPool_reverts_alreadyInitialized() public {
+        PoolKey memory key2 = _altKey(500);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+        vm.expectRevert();
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+    }
+
+    function test_gateway_directInitializeAlwaysReverts() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.afterInitialize.selector,
+                abi.encodeWithSelector(BinBook.InitializeViaCreatePool.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        poolManager.initialize(_altKey(700), Constants.SQRT_PRICE_1_1);
+
+        PoolKey memory key2 = _altKey(500);
+        hook.createPool(key2, Constants.SQRT_PRICE_1_1, 60);
+        assertTrue(hook.initializedPools(key2.toId()));
     }
 
     // ── liquidity ────────────────────────────────────────────────────────
 
     function test_addLiquidity_basic() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         BalanceDelta delta = _add(1 ether, 1 ether);
         assertGt(hook.getTotalShares(poolId), 0);
@@ -143,14 +201,25 @@ contract BinBookTest is BaseTest {
         assertTrue(delta.amount0() != 0 || delta.amount1() != 0);
     }
 
-    function test_addLiquidity_reverts_notConfigured() public {
+    function test_addLiquidity_reverts_unregisteredPool() public {
         _approve();
-        vm.expectRevert(BinBook.PoolNotConfigured.selector);
-        _add(1 ether, 1 ether);
+        vm.expectRevert(BaseCustomAccounting.PoolNotInitialized.selector);
+        hook.addLiquidity(
+            _altKey(700),
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 1 ether,
+                amount1Desired: 1 ether,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: 0,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
     }
 
     function test_addLiquidity_reverts_zero() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         vm.expectRevert(BinBook.ZeroAmounts.selector);
         _add(0, 0);
@@ -269,7 +338,6 @@ contract BinBookTest is BaseTest {
     }
 
     function test_addLiquidity_range_closerGetsMoreL() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         int24 cur = 0;
         _addRange(0, 100 ether, (cur - 25) * 60, (cur - 15) * 60);
@@ -287,7 +355,6 @@ contract BinBookTest is BaseTest {
     }
 
     function test_addLiquidity_range_firstDepositIncludesSpotWindow() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         _addRange(0, 50 ether, -30 * 60, -15 * 60);
         assertEq(hook.minBin(poolId), -30);
@@ -298,14 +365,12 @@ contract BinBookTest is BaseTest {
     }
 
     function test_addLiquidity_range_reverts_misaligned() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         vm.expectRevert(BinBook.TicksNotAlignedToBins.selector);
         _addRange(0, 1 ether, -181, -60);
     }
 
     function test_addLiquidity_range_reverts_tooManyBins() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         // 257 bins of size 60
         vm.expectRevert(BinBook.TooManyBins.selector);
@@ -313,15 +378,12 @@ contract BinBookTest is BaseTest {
     }
 
     function test_addLiquidity_range_usdcOnlyWrongSide_reverts() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         // Above spot needs token0; USDC-only (token1) cannot fill it.
-        vm.expectRevert();
-        _addRange(0, 10 ether, 12 * 60, 22 * 60);
+        vm.expectRevert(SwapMath.InsufficientLiquidity.selector);
     }
 
     function test_swap_walksEmptyGapToFarBin() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         _addRange(0, 200 ether, -25 * 60, -15 * 60);
         uint160 before = hook.currentSqrtPriceX96(poolId);
@@ -330,10 +392,19 @@ contract BinBookTest is BaseTest {
         assertLt(hook.currentBin(poolId), 0);
     }
 
+    // ── auto-computed custom-range ramp ─────────────────────────────────
+
+    function test_ramp_legacyPath_stillFloorsAtDefaultRamp() public {
+        _approve();
+        // Narrow range needs only ramp 4, but the no-ramp path keeps the DEFAULT_RAMP = 10 floor.
+        _addRange(100 ether, 100 ether, -3 * 60, 3 * 60);
+        assertEq(hook.liquidity(poolId, -1), hook.liquidity(poolId, 0));
+        assertEq(uint256(hook.liquidity(poolId, -3)) * 9, uint256(hook.liquidity(poolId, 0)) * 7);
+    }
+
     // ── swap ─────────────────────────────────────────────────────────────
 
     function test_swap_revertsBeforeSeed() public {
-        hook.setBinSize(poolKey, 60);
         vm.expectRevert();
         swapRouter.swapExactTokensForTokens(1 ether, 0, false, poolKey, "", address(this), block.timestamp);
     }
@@ -385,7 +456,6 @@ contract BinBookTest is BaseTest {
     }
 
     function test_fees_sameRange_splitByL() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         address bob = _bob();
         _addRange(0, 100 ether, -20 * 60, -5 * 60);
@@ -407,7 +477,6 @@ contract BinBookTest is BaseTest {
     }
 
     function test_fees_onlyBinsTouchedEarn() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         address bob = _bob();
         _addRange(0, 100 ether, -30 * 60, -20 * 60);
@@ -423,7 +492,6 @@ contract BinBookTest is BaseTest {
     }
 
     function test_fees_collectPaysUser() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         _addRange(0, 100 ether, -20 * 60, -5 * 60);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
@@ -443,7 +511,6 @@ contract BinBookTest is BaseTest {
     }
 
     function test_fees_overlapAliceBob() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         address bob = _bob();
         _addRange(0, 100 ether, -30 * 60, -15 * 60);
@@ -465,7 +532,6 @@ contract BinBookTest is BaseTest {
     }
 
     function test_fees_secondAddRealizesThenCollect() public {
-        hook.setBinSize(poolKey, 60);
         _approve();
         _addRange(0, 50 ether, -20 * 60, -5 * 60);
         swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);

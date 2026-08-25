@@ -5,6 +5,7 @@ import {BaseCustomCurve} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomCu
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -12,6 +13,7 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
@@ -19,12 +21,62 @@ import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
 
 import {SwapMath} from "./libraries/SwapMath.sol";
 
+/*//////////////////////////////////////////////////////////////
+                                 TYPES
+//////////////////////////////////////////////////////////////*/
+
+struct Book {
+    int24 binSize;
+    uint16 ramp;
+    uint16 numBinsPerSide;
+    int24 currentBin;
+    int24 minBin;
+    int24 maxBin;
+    uint160 sqrtPriceX96;
+    bool seeded;
+}
+
+struct Position {
+    uint128 liquidity;
+    uint256 feeGrowth0LastX128;
+    uint256 feeGrowth1LastX128;
+    uint256 tokensOwed0;
+    uint256 tokensOwed1;
+}
+
+struct UserRange {
+    int24 minB;
+    int24 maxB;
+    bool set;
+}
+
+struct BinWindow {
+    int24 minB;
+    int24 maxB;
+    int24 cur;
+    uint256 ramp;
+}
+
+/// @dev Running totals for one swap across the book.
+struct WalkCtx {
+    uint256 remaining;
+    uint256 amountOut;
+    uint256 feeTotal;
+    uint160 sqrtEnd;
+    uint256 endIndex;
+}
+
 /// @title BinBook
 /// @notice Multi-pool hook-owned bin book. Each bin is a mini x*y=k range; LinearDecay sizes L.
 ///         State is keyed by PoolId. Pass PoolKey on add/remove; tickLower/tickUpper place liquidity.
 contract BinBook is BaseCustomCurve {
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
+    using StateLibrary for IPoolManager;
+
+    /*//////////////////////////////////////////////////////////////
+                                CONSTANTS
+    //////////////////////////////////////////////////////////////*/
 
     uint16 public constant DEFAULT_RAMP = 10;
     uint16 public constant DEFAULT_BINS_PER_SIDE = 10;
@@ -33,25 +85,11 @@ contract BinBook is BaseCustomCurve {
     /// @dev Cap on the contiguous book. Swaps load every bin in `[minBin, maxBin]`.
     uint16 public constant MAX_BOOK_BINS = 1024;
 
-    uint160 public constant HOOK_FLAGS = uint160(
-        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-            | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
-    );
-
-    struct Book {
-        int24 binSize;
-        uint16 ramp;
-        uint16 numBinsPerSide;
-        int24 currentBin;
-        int24 minBin;
-        int24 maxBin;
-        uint160 sqrtPriceX96;
-        bool configured;
-        bool seeded;
-    }
+    /*//////////////////////////////////////////////////////////////
+                                 STORAGE
+    //////////////////////////////////////////////////////////////*/
 
     mapping(PoolId poolId => address) public poolCreator;
-    mapping(PoolId poolId => bool) public binSizeSet;
     mapping(PoolId poolId => uint256) public totalShares;
     mapping(PoolId poolId => mapping(address user => uint256)) public sharesOf;
 
@@ -62,33 +100,27 @@ contract BinBook is BaseCustomCurve {
     mapping(PoolId poolId => mapping(int24 binIndex => uint256)) public feeGrowth0X128;
     mapping(PoolId poolId => mapping(int24 binIndex => uint256)) public feeGrowth1X128;
 
-    struct Position {
-        uint128 liquidity;
-        uint256 feeGrowth0LastX128;
-        uint256 feeGrowth1LastX128;
-        uint256 tokensOwed0;
-        uint256 tokensOwed1;
-    }
-
-    struct UserRange {
-        int24 minB;
-        int24 maxB;
-        bool set;
-    }
-
     mapping(PoolId poolId => mapping(address user => mapping(int24 binIndex => Position))) public positions;
     mapping(PoolId poolId => mapping(address user => UserRange)) public userRanges;
 
     mapping(PoolId poolId => uint256) private _lastSwapFee;
 
+    /*//////////////////////////////////////////////////////////////
+                                  EVENTS
+    //////////////////////////////////////////////////////////////*/
+
     event BinSizeSet(PoolId indexed poolId, address indexed creator, int24 binSize);
     event BookExpanded(PoolId indexed poolId, int24 minBin, int24 maxBin);
     event FeesCollected(PoolId indexed poolId, address indexed user, uint256 amount0, uint256 amount1);
 
-    error NotPoolCreator();
-    error BinSizeAlreadySet();
+    /// @notice Emitted when a pool is created through the gateway with its locked bin size.
+    event PoolCreated(PoolId indexed poolId, address indexed creator, PoolKey key, int24 binSize);
+
+    /*//////////////////////////////////////////////////////////////
+                                  ERRORS
+    //////////////////////////////////////////////////////////////*/
+
     error InvalidBinSize();
-    error PoolNotConfigured();
     error ExactOutputNotSupported();
     error ZeroAmounts();
     error TicksNotAlignedToBins();
@@ -96,15 +128,23 @@ contract BinBook is BaseCustomCurve {
     error TooManyBins();
     error BookTooWide();
     error InsufficientShares();
+    error InitializeViaCreatePool();
+    error InvalidHook();
 
-    struct BinWindow {
-        int24 minB;
-        int24 maxB;
-        int24 cur;
-        uint256 ramp;
-    }
+    /*//////////////////////////////////////////////////////////////
+                               CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
 
     constructor(IPoolManager _poolManager) BaseCustomCurve(_poolManager) {}
+
+    /*//////////////////////////////////////////////////////////////
+                             HOOK PERMISSIONS
+    //////////////////////////////////////////////////////////////*/
+
+    uint160 public constant HOOK_FLAGS = uint160(
+        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+            | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+    );
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -125,39 +165,174 @@ contract BinBook is BaseCustomCurve {
         });
     }
 
-    function _afterInitialize(address sender, PoolKey calldata key, uint160 sqrtPriceX96, int24)
-        internal
-        override
-        returns (bytes4)
-    {
-        PoolId id = key.toId();
-        poolCreator[id] = sender;
-        books[id].sqrtPriceX96 = sqrtPriceX96;
+    /*//////////////////////////////////////////////////////////////
+                              HOOK CALLBACKS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Enforces the creation gateway: pools can only be born via createPool.
+    /// @dev v4 skips hook callbacks when the hook itself calls initialize, so self-calls from
+    ///      createPool pass; any external initialize reverts here, rolling back the whole creation.
+    function _afterInitialize(address sender, PoolKey calldata, uint160, int24) internal override returns (bytes4) {
+        if (sender != address(this)) revert InitializeViaCreatePool();
         return this.afterInitialize.selector;
     }
 
-    function setBinSize(PoolKey calldata key, int24 _binSize) external {
+    function _getAmountIn(PoolKey memory key, AddLiquidityParams memory params)
+        internal
+        override
+        returns (uint256 amount0, uint256 amount1, uint256 shares)
+    {
         PoolId id = key.toId();
-        if (msg.sender != poolCreator[id]) revert NotPoolCreator();
-        if (binSizeSet[id]) revert BinSizeAlreadySet();
-        if (_binSize <= 0 || uint256(uint24(_binSize)) > 2_000) revert InvalidBinSize();
+        if (params.amount0Desired == 0 && params.amount1Desired == 0) revert ZeroAmounts();
 
-        Book storage b = books[id];
-        b.binSize = _binSize;
-        b.ramp = DEFAULT_RAMP;
-        b.numBinsPerSide = DEFAULT_BINS_PER_SIDE;
-        b.configured = true;
-        binSizeSet[id] = true;
+        BinWindow memory w = _windowFor(id, params.tickLower, params.tickUpper);
+        uint256 LBase = _previewLBase(id, w, params.amount0Desired, params.amount1Desired);
+        (amount0, amount1) = _applyLBase(id, w, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
+        shares = amount0 + amount1;
+        if (shares == 0) revert ZeroAmounts();
+    }
+
+    function _getAmountOut(PoolKey memory key, RemoveLiquidityParams memory params)
+        internal
+        override
+        returns (uint256 amount0, uint256 amount1, uint256 shares)
+    {
+        PoolId id = key.toId();
+
+        uint256 userShares = sharesOf[id][msg.sender];
+        shares = params.liquidity;
+        if (shares == 0 || shares > userShares) revert InsufficientShares();
+
+        uint256 supply = totalShares[id];
+        // currency.toId() is preferred; unwrap works for ERC20 address ids used by PoolManager claims
+        uint256 claim0 = poolManager.balanceOf(address(this), key.currency0.toId());
+        uint256 claim1 = poolManager.balanceOf(address(this), key.currency1.toId());
+        (amount0, amount1) = SwapMath.getWithdrawAmounts(claim0, claim1, shares, supply);
+
+        _unwindUserL(id, msg.sender, shares, userShares);
+    }
+
+    function _getUnspecifiedAmount(PoolKey calldata key, SwapParams calldata params)
+        internal
+        override
+        returns (uint256 unspecifiedAmount)
+    {
+        if (params.amountSpecified >= 0) revert ExactOutputNotSupported();
+        PoolId id = key.toId();
+        if (!books[id].seeded) revert SwapMath.InsufficientLiquidity();
+        unspecifiedAmount = _swapExactIn(key, uint256(-params.amountSpecified), params.zeroForOne);
+    }
+
+    function _getSwapFeeAmount(PoolKey calldata key, SwapParams calldata, uint256)
+        internal
+        view
+        override
+        returns (uint256)
+    {
+        return _lastSwapFee[key.toId()];
+    }
+
+    function _mint(PoolKey memory key, AddLiquidityParams memory, BalanceDelta, BalanceDelta, uint256 shares)
+        internal
+        override
+    {
+        PoolId id = key.toId();
+        totalShares[id] += shares;
+        sharesOf[id][msg.sender] += shares;
+    }
+
+    function _burn(PoolKey memory key, RemoveLiquidityParams memory, BalanceDelta, BalanceDelta, uint256 shares)
+        internal
+        override
+    {
+        PoolId id = key.toId();
+        totalShares[id] -= shares;
+        sharesOf[id][msg.sender] -= shares;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              POOL CREATION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Creates a pool against this hook with bin size chosen and locked atomically.
+    /// @dev The only way to create a BinBook pool. Self-initializes: v4 skips all hook callbacks
+    ///      when the hook is the caller, so registration normally done by hooks is performed here.
+    ///      binSize is immutable for the pool's lifetime; different granularity requires a new pool,
+    ///      mirroring Uniswap v4 tickSpacing and Trader Joe binStep semantics.
+    /// @param key The pool key; currency0 must sort below currency1 and key.hooks must be this contract
+    /// @param sqrtPriceX96 The starting sqrt price
+    /// @param _binSize Number of ticks per bin (1..2_000), immutable once set
+    function createPool(PoolKey calldata key, uint160 sqrtPriceX96, int24 _binSize) external {
+        if (!(Currency.unwrap(key.currency0) < Currency.unwrap(key.currency1))) {
+            revert IPoolManager.CurrenciesOutOfOrderOrEqual(
+                Currency.unwrap(key.currency0), Currency.unwrap(key.currency1)
+            );
+        }
+        if (key.hooks != IHooks(address(this))) revert InvalidHook();
+        _validateBinSize(_binSize);
+
+        PoolId id = key.toId();
+        poolManager.initialize(key, sqrtPriceX96);
+
+        initializedPools[id] = true;
+        poolCreator[id] = msg.sender;
+
+        books[id] = Book({
+            binSize: _binSize,
+            ramp: DEFAULT_RAMP,
+            numBinsPerSide: DEFAULT_BINS_PER_SIDE,
+            currentBin: 0,
+            minBin: 0,
+            maxBin: 0,
+            sqrtPriceX96: sqrtPriceX96,
+            seeded: false
+        });
 
         emit BinSizeSet(id, msg.sender, _binSize);
+        emit PoolCreated(id, msg.sender, key, _binSize);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                               USER ACTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Realize and pay accrued swap fees for `msg.sender` across their bins in `key`.
+    function collectFees(PoolKey calldata key) external returns (uint256 amount0, uint256 amount1) {
+        PoolId id = key.toId();
+        UserRange memory r = userRanges[id][msg.sender];
+        if (!r.set) return (0, 0);
+
+        for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
+            Position storage p = positions[id][msg.sender][idx];
+            if (p.liquidity == 0 && p.tokensOwed0 == 0 && p.tokensOwed1 == 0) continue;
+            _realizeFees(id, msg.sender, idx);
+            amount0 += p.tokensOwed0;
+            amount1 += p.tokensOwed1;
+            p.tokensOwed0 = 0;
+            p.tokensOwed1 = 0;
+        }
+
+        if (amount0 == 0 && amount1 == 0) return (0, 0);
+
+        poolManager.unlock(
+            abi.encode(
+                CallbackDataCustom(
+                    msg.sender,
+                    key,
+                    amount0 == 0 ? int128(0) : -amount0.toInt128(),
+                    amount1 == 0 ? int128(0) : -amount1.toInt128()
+                )
+            )
+        );
+        emit FeesCollected(id, msg.sender, amount0, amount1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              VIEW HELPERS
+    //////////////////////////////////////////////////////////////*/
 
     function getBinSize(PoolId id) external view returns (int24) {
         return books[id].binSize;
-    }
-
-    function isConfigured(PoolId id) external view returns (bool) {
-        return books[id].configured;
     }
 
     function getTotalShares(PoolId id) external view returns (uint256) {
@@ -184,62 +359,27 @@ contract BinBook is BaseCustomCurve {
         return books[id].maxBin;
     }
 
-    function _getAmountIn(PoolKey memory key, AddLiquidityParams memory params)
-        internal
-        override
-        returns (uint256 amount0, uint256 amount1, uint256 shares)
-    {
-        PoolId id = key.toId();
-        if (!books[id].configured) revert PoolNotConfigured();
-        if (params.amount0Desired == 0 && params.amount1Desired == 0) revert ZeroAmounts();
-
-        BinWindow memory w = _windowFor(id, params.tickLower, params.tickUpper);
-        uint256 LBase = _previewLBase(id, w, params.amount0Desired, params.amount1Desired);
-        (amount0, amount1) = _applyLBase(id, w, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
-        shares = amount0 + amount1;
-        if (shares == 0) revert ZeroAmounts();
+    function liquidityOf(PoolId id, address user, int24 binIndex) external view returns (uint128) {
+        return positions[id][user][binIndex].liquidity;
     }
 
-    function _getAmountOut(PoolKey memory key, RemoveLiquidityParams memory params)
-        internal
-        override
-        returns (uint256 amount0, uint256 amount1, uint256 shares)
-    {
-        PoolId id = key.toId();
-        if (!books[id].configured) revert PoolNotConfigured();
-
-        uint256 userShares = sharesOf[id][msg.sender];
-        shares = params.liquidity;
-        if (shares == 0 || shares > userShares) revert InsufficientShares();
-
-        uint256 supply = totalShares[id];
-        // currency.toId() is preferred; unwrap works for ERC20 address ids used by PoolManager claims
-        uint256 claim0 = poolManager.balanceOf(address(this), key.currency0.toId());
-        uint256 claim1 = poolManager.balanceOf(address(this), key.currency1.toId());
-        (amount0, amount1) = SwapMath.getWithdrawAmounts(claim0, claim1, shares, supply);
-
-        _unwindUserL(id, msg.sender, shares, userShares);
+    function pendingFees(PoolId id, address user) public view returns (uint256 amount0, uint256 amount1) {
+        UserRange memory r = userRanges[id][user];
+        if (!r.set) return (0, 0);
+        for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
+            Position storage p = positions[id][user][idx];
+            amount0 += p.tokensOwed0;
+            amount1 += p.tokensOwed1;
+            uint256 L = p.liquidity;
+            if (L == 0) continue;
+            amount0 += FullMath.mulDiv(feeGrowth0X128[id][idx] - p.feeGrowth0LastX128, L, FixedPoint128.Q128);
+            amount1 += FullMath.mulDiv(feeGrowth1X128[id][idx] - p.feeGrowth1LastX128, L, FixedPoint128.Q128);
+        }
     }
 
-    function _getUnspecifiedAmount(PoolKey calldata key, SwapParams calldata params)
-        internal
-        override
-        returns (uint256 unspecifiedAmount)
-    {
-        if (params.amountSpecified >= 0) revert ExactOutputNotSupported();
-        PoolId id = key.toId();
-        if (!books[id].seeded) revert SwapMath.InsufficientLiquidity();
-        unspecifiedAmount = _swapExactIn(key, uint256(-params.amountSpecified), params.zeroForOne);
-    }
-
-    /// @dev Running totals for one swap across the book.
-    struct WalkCtx {
-        uint256 remaining;
-        uint256 amountOut;
-        uint256 feeTotal;
-        uint160 sqrtEnd;
-        uint256 endIndex;
-    }
+    /*//////////////////////////////////////////////////////////////
+                             INTERNAL HELPERS
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Exact-in swap walking the book with Uniswap-style per-step fees.
     /// @dev Each step runs SwapMath.computeSwapStep against one bin; the step's fee is
@@ -310,82 +450,6 @@ contract BinBook is BaseCustomCurve {
         Book storage b = books[id];
         b.sqrtPriceX96 = sqrtEnd;
         b.currentBin = b.minBin + int24(int256(endIndex));
-    }
-
-    function _getSwapFeeAmount(PoolKey calldata key, SwapParams calldata, uint256)
-        internal
-        view
-        override
-        returns (uint256)
-    {
-        return _lastSwapFee[key.toId()];
-    }
-
-    function liquidityOf(PoolId id, address user, int24 binIndex) external view returns (uint128) {
-        return positions[id][user][binIndex].liquidity;
-    }
-
-    function pendingFees(PoolId id, address user) public view returns (uint256 amount0, uint256 amount1) {
-        UserRange memory r = userRanges[id][user];
-        if (!r.set) return (0, 0);
-        for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
-            Position storage p = positions[id][user][idx];
-            amount0 += p.tokensOwed0;
-            amount1 += p.tokensOwed1;
-            uint256 L = p.liquidity;
-            if (L == 0) continue;
-            amount0 += FullMath.mulDiv(feeGrowth0X128[id][idx] - p.feeGrowth0LastX128, L, FixedPoint128.Q128);
-            amount1 += FullMath.mulDiv(feeGrowth1X128[id][idx] - p.feeGrowth1LastX128, L, FixedPoint128.Q128);
-        }
-    }
-
-    /// @notice Realize and pay accrued swap fees for `msg.sender` across their bins in `key`.
-    function collectFees(PoolKey calldata key) external returns (uint256 amount0, uint256 amount1) {
-        PoolId id = key.toId();
-        UserRange memory r = userRanges[id][msg.sender];
-        if (!r.set) return (0, 0);
-
-        for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
-            Position storage p = positions[id][msg.sender][idx];
-            if (p.liquidity == 0 && p.tokensOwed0 == 0 && p.tokensOwed1 == 0) continue;
-            _realizeFees(id, msg.sender, idx);
-            amount0 += p.tokensOwed0;
-            amount1 += p.tokensOwed1;
-            p.tokensOwed0 = 0;
-            p.tokensOwed1 = 0;
-        }
-
-        if (amount0 == 0 && amount1 == 0) return (0, 0);
-
-        poolManager.unlock(
-            abi.encode(
-                CallbackDataCustom(
-                    msg.sender,
-                    key,
-                    amount0 == 0 ? int128(0) : -amount0.toInt128(),
-                    amount1 == 0 ? int128(0) : -amount1.toInt128()
-                )
-            )
-        );
-        emit FeesCollected(id, msg.sender, amount0, amount1);
-    }
-
-    function _mint(PoolKey memory key, AddLiquidityParams memory, BalanceDelta, BalanceDelta, uint256 shares)
-        internal
-        override
-    {
-        PoolId id = key.toId();
-        totalShares[id] += shares;
-        sharesOf[id][msg.sender] += shares;
-    }
-
-    function _burn(PoolKey memory key, RemoveLiquidityParams memory, BalanceDelta, BalanceDelta, uint256 shares)
-        internal
-        override
-    {
-        PoolId id = key.toId();
-        totalShares[id] -= shares;
-        sharesOf[id][msg.sender] -= shares;
     }
 
     /// @dev Reduce the caller's bin L proportional to shares burned / their total shares.
@@ -502,7 +566,8 @@ contract BinBook is BaseCustomCurve {
         else feeGrowth1X128[id][idx] += delta;
     }
 
-    /// @dev `tickLower >= tickUpper` (including 0,0) keeps the default near-spot window.
+    /// @dev `tickLower >= tickUpper` (including 0,0) keeps the default near-spot window with the book's
+    ///      ramp. Custom ranges auto-floor the ramp at `farthestDistance + 1` so every bin gets funded.
     function _windowFor(PoolId id, int24 tickLower, int24 tickUpper) internal view returns (BinWindow memory w) {
         Book storage b = books[id];
         (int24 defMin, int24 defMax, int24 cur) = _binRange(id);
@@ -600,9 +665,7 @@ contract BinBook is BaseCustomCurve {
         int24 tickLo = _tickAtBin(id, binIndex);
         uint160 sqrtLo = TickMath.getSqrtPriceAtTick(tickLo);
         uint160 sqrtHi = TickMath.getSqrtPriceAtTick(tickLo + b.binSize);
-        return SwapMath.getTokenAmountsForBin(
-            L, uint256(sqrtP), SwapMath.BinBounds(uint256(sqrtLo), uint256(sqrtHi))
-        );
+        return SwapMath.getTokenAmountsForBin(L, uint256(sqrtP), SwapMath.BinBounds(uint256(sqrtLo), uint256(sqrtHi)));
     }
 
     function _loadBins(PoolId id) internal view returns (SwapMath.Bin[] memory bins, uint256 active) {
@@ -631,5 +694,10 @@ contract BinBook is BaseCustomCurve {
         int24 q = a / b;
         if (a % b != 0 && a < 0) q -= 1;
         return q;
+    }
+
+    /// @dev Shared bin size validation for createPool.
+    function _validateBinSize(int24 _binSize) private pure {
+        if (_binSize <= 0 || uint256(uint24(_binSize)) > 2_000) revert InvalidBinSize();
     }
 }

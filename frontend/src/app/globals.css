@@ -1,4 +1,4 @@
-@import 'tailwindcss';
+@import "tailwindcss";
 
 :root {
   --bg: #07080a;
@@ -13,6 +13,8 @@
   --accent-ink: #04140c;
   --danger: #f07167;
   --warn: #e6b35a;
+  --up: #3ecf8e;
+  --down: #f07167;
   --radius: 1.25rem;
   --radius-sm: 0.85rem;
   --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
@@ -28,16 +30,20 @@ body {
   min-height: 100%;
   background:
     radial-gradient(900px 420px at 50% -8%, rgba(62, 207, 142, 0.08), transparent 55%),
-    radial-gradient(700px 380px at 100% 0%, rgba(80, 120, 180, 0.06), transparent 50%),
-    var(--bg);
+    radial-gradient(700px 380px at 100% 0%, rgba(80, 120, 180, 0.06), transparent 50%), var(--bg);
   color: var(--ink);
-  font-family: var(--font-body), 'Helvetica Neue', sans-serif;
+  font-family: var(--font-body), "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 a {
   color: inherit;
   text-decoration: none;
+}
+
+.mono {
+  font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 button,
@@ -90,7 +96,9 @@ input {
   border-radius: 999px;
   font-size: 0.9rem;
   font-weight: 500;
-  transition: color 120ms ease, background 120ms ease;
+  transition:
+    color 120ms ease,
+    background 120ms ease;
 }
 
 .nav-link.active {
@@ -135,6 +143,361 @@ input {
   .trade-layout {
     grid-template-columns: 1fr;
   }
+}
+
+/* ——— Stats bar ——— */
+.stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1.25rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.stats-bar.preview {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--warn) 40%, var(--line));
+}
+
+.stats-bar-pair {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.stats-bar-metrics {
+  display: flex;
+  gap: 1.75rem;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.stat-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.stat-pill-label {
+  font-size: 0.66rem;
+  color: var(--muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-pill-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.up {
+  color: var(--up);
+}
+
+.down {
+  color: var(--down);
+}
+
+/* ——— Chart-forward trade grid (home page) ——— */
+.trade-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.trade-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.trade-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  position: sticky;
+  top: 5.5rem;
+}
+
+@media (max-width: 980px) {
+  .trade-grid {
+    grid-template-columns: 1fr;
+  }
+  .trade-side {
+    position: static;
+  }
+  .stats-bar-metrics {
+    margin-left: 0;
+  }
+}
+
+.chart-panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.chart-panel.preview {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--warn) 40%, var(--line));
+}
+
+.chart-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.chart-tf-group {
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  background: var(--bg-input);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+
+.chart-tf {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.32rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chart-tf.active {
+  background: var(--bg-elevated);
+  color: var(--ink);
+}
+
+.chart-refresh {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--bg-input);
+  color: var(--muted);
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.6rem;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 1rem;
+}
+
+.chart-refresh:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.chart-canvas-wrap {
+  position: relative;
+}
+
+.chart-canvas {
+  height: 380px;
+  width: 100%;
+}
+
+.chart-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 0 2rem;
+  pointer-events: none;
+}
+
+/* ——— Liquidity ladder ——— */
+.ladder-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.ladder-caption {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.68rem !important;
+}
+
+.ladder {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ladder-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px;
+  height: 26px;
+}
+
+.ladder-idx {
+  width: 34px;
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  color: var(--muted-2);
+}
+
+.ladder-price {
+  width: 76px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.ladder-bar-track {
+  position: relative;
+  flex: 1;
+  height: 13px;
+  border-radius: 3px;
+  background: var(--bg-input);
+  overflow: hidden;
+}
+
+.ladder-row.buy .ladder-bar-track {
+  background: color-mix(in oklab, var(--up) 8%, var(--bg-input));
+}
+
+.ladder-row.sell .ladder-bar-track {
+  background: color-mix(in oklab, var(--down) 8%, var(--bg-input));
+}
+
+.ladder-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+}
+
+.ladder-bar.buy {
+  right: 0;
+  background: color-mix(in oklab, var(--up) 55%, transparent);
+}
+
+.ladder-bar.sell {
+  left: 0;
+  background: color-mix(in oklab, var(--down) 55%, transparent);
+}
+
+.ladder-spot {
+  margin: 3px 0;
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+  border-top: 1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
+  border-radius: 4px;
+  box-shadow: 0 0 14px color-mix(in oklab, var(--accent) 30%, transparent);
+}
+
+.ladder-spot .ladder-idx {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ladder-spot-label {
+  flex: 1;
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+.ladder-spot .ladder-price {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ——— Trade view tabs ——— */
+.trade-tabs {
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  background: var(--bg-input);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  width: fit-content;
+  margin-bottom: 0.85rem;
+}
+
+.trade-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.4rem 1rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.trade-tab.active {
+  background: var(--bg-elevated);
+  color: var(--ink);
+}
+
+/* ——— Stats bar sparkline ——— */
+.stats-bar-spark {
+  flex-shrink: 0;
+}
+
+/* ——— Activity table ——— */
+.activity-table-wrap {
+  overflow-x: auto;
+}
+
+.activity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.activity-table th {
+  text-align: left;
+  color: var(--muted-2);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.activity-table td {
+  padding: 0.55rem 0.6rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 55%, transparent);
+  white-space: nowrap;
+}
+
+.activity-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
 
 .swap-stage {
@@ -362,7 +725,9 @@ input {
   font-weight: 700;
   font-size: 1.05rem;
   cursor: pointer;
-  transition: filter 120ms ease, transform 120ms ease;
+  transition:
+    filter 120ms ease,
+    transform 120ms ease;
 }
 
 .cta:hover:not(:disabled) {
@@ -451,6 +816,28 @@ input {
 .depth-bar.active {
   background: var(--accent);
   box-shadow: 0 0 12px color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+.depth-bar.buy {
+  background: color-mix(in oklab, var(--up) 32%, var(--bg-input));
+}
+
+.depth-bar.sell {
+  background: color-mix(in oklab, var(--down) 28%, var(--bg-input));
+}
+
+.depth-bar.clickable {
+  cursor: pointer;
+}
+
+.depth-bar.clickable:hover {
+  filter: brightness(1.25);
+}
+
+.depth-bar.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: 0 0 10px color-mix(in oklab, var(--accent) 45%, transparent);
 }
 
 .meta-grid {
@@ -609,7 +996,11 @@ input {
   margin-bottom: 1.25rem;
   border-radius: 18px;
   background:
-    radial-gradient(600px 220px at 50% -40px, color-mix(in oklab, var(--accent) 16%, transparent), transparent 70%),
+    radial-gradient(
+      600px 220px at 50% -40px,
+      color-mix(in oklab, var(--accent) 16%, transparent),
+      transparent 70%
+    ),
     var(--bg-elevated);
   border: 1px solid color-mix(in oklab, var(--accent) 14%, transparent);
   text-align: center;
@@ -621,7 +1012,11 @@ input {
   width: 420px;
   height: 160px;
   transform: translateX(50%);
-  background: radial-gradient(closest-side, color-mix(in oklab, var(--accent) 22%, transparent), transparent);
+  background: radial-gradient(
+    closest-side,
+    color-mix(in oklab, var(--accent) 22%, transparent),
+    transparent
+  );
   filter: blur(30px);
   pointer-events: none;
 }
@@ -745,7 +1140,10 @@ input {
   border-radius: 14px;
   background: var(--bg-elevated);
   border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
 }
 .token-card:hover {
   transform: translateY(-2px);
@@ -754,7 +1152,9 @@ input {
 }
 .token-card-done {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 8px 24px color-mix(in oklab, var(--accent) 20%, transparent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 8px 24px color-mix(in oklab, var(--accent) 20%, transparent);
 }
 .token-card-head {
   display: flex;

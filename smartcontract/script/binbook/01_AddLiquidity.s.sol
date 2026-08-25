@@ -7,6 +7,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
 import {BinBook} from "../../src/BinBook.sol";
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
@@ -15,6 +16,7 @@ import {BinBookBase} from "./BinBookBase.s.sol";
 /// @notice Adds full-range liquidity to the deployed pool and prints resulting shares.
 contract AddLiquidity is BinBookBase {
     using PoolIdLibrary for PoolKey;
+
     function run() external {
         Deployment memory d = loadDeployment();
         BinBook binBook = BinBook(d.binBook);
@@ -29,8 +31,8 @@ contract AddLiquidity is BinBookBase {
         IERC20(d.token0).approve(d.binBook, type(uint256).max);
         IERC20(d.token1).approve(d.binBook, type(uint256).max);
 
-        if (!binBook.isConfigured(key.toId()) || binBook.getBinSize(key.toId()) == 0) {
-            binBook.setBinSize(key, d.tickSpacing);
+        if (binBook.getBinSize(key.toId()) == 0) {
+            binBook.createPool(key, Constants.SQRT_PRICE_1_1, d.tickSpacing);
         }
 
         binBook.addLiquidity(

@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Pool} from "@uniswap/v4-core/src/libraries/Pool.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
+import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
+
+import {BinBook} from "../src/BinBook.sol";
+import {BaseTest} from "./utils/BaseTest.sol";
+
+contract BinBookCreatePoolTest is BaseTest {
+    using PoolIdLibrary for PoolKey;
+    using CurrencyLibrary for Currency;
+
+    uint160 internal constant HOOK_FLAGS = uint160(
+        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+            | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+    );
+    address flags;
+
+    function setUp() public {
+        deployArtifactsAndLabel();
+        flags = address(uint160(HOOK_FLAGS));
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flags);
+    }
+
+    function _freshKey(BinBook hook) internal returns (PoolKey memory) {
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        return
+            PoolKey({
+                currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(hook))
+            });
+    }
+
+    function test_revert_createPoolWithUnSortedCurrencies() public {
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        PoolKey memory key =
+            PoolKey({currency0: currency1, currency1: currency0, fee: 100, tickSpacing: 1, hooks: IHooks(address(0))});
+
+        vm.expectRevert(abi.encodeWithSelector(IPoolManager.CurrenciesOutOfOrderOrEqual.selector, currency1, currency0));
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+    }
+
+    function test_revert_createPoolWithEqualCurrencies() public {
+        Currency currencyA = deployCurrency();
+
+        PoolKey memory key =
+            PoolKey({currency0: currencyA, currency1: currencyA, fee: 100, tickSpacing: 1, hooks: IHooks(address(0))});
+
+        vm.expectRevert(abi.encodeWithSelector(IPoolManager.CurrenciesOutOfOrderOrEqual.selector, currencyA, currencyA));
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+    }
+
+    function test_revert_createPoolTwiceOnSameKey() public {
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+        int24 binSize = 100;
+
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
+
+        vm.expectRevert(Pool.PoolAlreadyInitialized.selector);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
+    }
+
+    function test_revert_createPoolWithInvalidBinSize() public {
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        BinBook hook = BinBook(flags);
+
+        PoolKey memory key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(hook))
+        });
+
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 0);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, -10);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 2001);
+    }
+
+    function test_revert_createPoolWithBinSizeAtBoundaries() public {
+        BinBook hook = BinBook(flags);
+
+        PoolKey memory keyMin = _freshKey(hook);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(keyMin, Constants.SQRT_PRICE_1_1, type(int24).min);
+
+        PoolKey memory keyMax = _freshKey(hook);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(keyMax, Constants.SQRT_PRICE_1_1, type(int24).max);
+
+        PoolKey memory keyOver = _freshKey(hook);
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(keyOver, Constants.SQRT_PRICE_1_1, 2001);
+
+        // Exact valid boundaries must succeed.
+        hook.createPool(_freshKey(hook), Constants.SQRT_PRICE_1_1, 1);
+        hook.createPool(_freshKey(hook), Constants.SQRT_PRICE_1_1, 2_000);
+    }
+
+    function testFuzz_createPool_validBinSizeSucceeds(int24 binSize) public {
+        binSize = int24(bound(int256(binSize), 1, 2_000));
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
+
+        PoolId id = key.toId();
+        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
+        assertEq(storedBinSize, binSize);
+        assertFalse(seeded);
+        assertTrue(hook.initializedPools(id));
+    }
+
+    function testFuzz_createPool_RevertWhen_invalidBinSize(int24 binSize) public {
+        vm.assume(binSize <= 0 || binSize > 2_000);
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+
+        vm.expectRevert(BinBook.InvalidBinSize.selector);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
+    }
+
+    function test_createPoolWithValidArguments() public {
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+        int24 binSize = 100;
+
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
+
+        PoolId id = key.toId();
+        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
+        assertEq(storedBinSize, binSize);
+        assertFalse(seeded);
+        assertTrue(hook.initializedPools(id));
+    }
+
+    function test_fuzz_createPoolWithValidArguments(uint160 rawSqrtPriceX96, int24 binSize) public {
+        binSize = int24(bound(int256(binSize), 1, 2_000));
+        uint160 sqrtPriceX96 = uint160(bound(rawSqrtPriceX96, TickMath.MIN_SQRT_PRICE, TickMath.MAX_SQRT_PRICE - 1));
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+
+        hook.createPool(key, sqrtPriceX96, binSize);
+
+        PoolId id = key.toId();
+        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
+        assertEq(storedBinSize, binSize);
+        assertFalse(seeded);
+        assertTrue(hook.initializedPools(id));
+    }
+
+    function testFuzz_createPool_poolCreatorAttribution(address caller) public {
+        vm.assume(caller != address(0));
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+
+        vm.prank(caller);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 100);
+
+        assertEq(hook.poolCreator(key.toId()), caller);
+    }
+
+    function test_directInitialize_alwaysReverts_gatewayIsPermanent() public {
+        BinBook hook = BinBook(flags);
+        PoolKey memory key = _freshKey(hook);
+        PoolId id = key.toId();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.afterInitialize.selector,
+                abi.encodeWithSelector(BinBook.InitializeViaCreatePool.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+
+        // Nothing registered: the failed initialize rolled back entirely.
+        assertFalse(hook.initializedPools(id));
+        assertEq(hook.poolCreator(id), address(0));
+        assertFalse(hook.initializedPools(key.toId()));
+    }
+}

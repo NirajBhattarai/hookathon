@@ -30,8 +30,7 @@ contract SeedFreshPool is BinBookBase {
         // p_raw = c1_raw/c0_raw so that priceUsdc human USDC == 1 human WETH
         // sqrtP = floor( sqrt(p_raw) * 2^96 ), computed off-chain for exactness
         string memory sqrtEnv = vm.envOr("SQRT_PRICE_X96", string(""));
-        uint160 sqrtP =
-            bytes(sqrtEnv).length > 0 ? uint160(vm.parseUint(sqrtEnv)) : uint160(_sqrtPriceX96(priceUsdc));
+        uint160 sqrtP = bytes(sqrtEnv).length > 0 ? uint160(vm.parseUint(sqrtEnv)) : uint160(_sqrtPriceX96(priceUsdc));
 
         int24 ts = int24(int256(vm.envUint("TICK_SPACING")));
         PoolKey memory key = PoolKey({
@@ -48,10 +47,8 @@ contract SeedFreshPool is BinBookBase {
 
         vm.startBroadcast();
 
-        POOL_MANAGER.initialize(key, sqrtP);
-
-        if (!binBook.isConfigured(key.toId()) || binBook.getBinSize(key.toId()) == 0) {
-            binBook.setBinSize(key, ts);
+        if (binBook.getBinSize(key.toId()) == 0) {
+            binBook.createPool(key, sqrtP, ts);
         }
 
         IERC20(d.token0).approve(d.binBook, type(uint256).max);

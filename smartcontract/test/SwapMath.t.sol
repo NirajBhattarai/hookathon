@@ -192,8 +192,7 @@ contract SwapMathTest is Test {
         assertEq(outClamped, outEdge);
         assertEq(feeClamped, feeEdge);
 
-        (qClamped, inClamped, outClamped, feeClamped) =
-            SwapMath.computeSwapStep(bin, above, -int256(1e15), FEE, true);
+        (qClamped, inClamped, outClamped, feeClamped) = SwapMath.computeSwapStep(bin, above, -int256(1e15), FEE, true);
         (qAtEdge, inEdge, outEdge, feeEdge) = SwapMath.computeSwapStep(bin, bin.sqrtHi, -int256(1e15), FEE, true);
         assertEq(qClamped, qAtEdge);
         assertEq(inClamped, inEdge);
@@ -437,7 +436,8 @@ contract SwapMathTest is Test {
         uint256 stepFee;
         uint160 q;
 
-        (q, stepIn, stepOut, stepFee) = SwapMath.computeSwapStep(bins[0], bins[0].sqrtLo, -int256(remaining), FEE, false);
+        (q, stepIn, stepOut, stepFee) =
+            SwapMath.computeSwapStep(bins[0], bins[0].sqrtLo, -int256(remaining), FEE, false);
         remaining -= stepIn + stepFee;
         uint256 expUsed = stepIn + stepFee;
         uint256 expFee = stepFee;

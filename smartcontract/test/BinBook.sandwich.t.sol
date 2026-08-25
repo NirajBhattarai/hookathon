@@ -53,24 +53,24 @@ contract BinBookSandwichTest is BaseTest {
         t1.approve(address(swapRouter), type(uint256).max);
 
         live.key = PoolKey(live.c0, live.c1, fee, tickSpacing, IHooks(address(live.hook)));
-        poolManager.initialize(live.key, Constants.SQRT_PRICE_1_1);
-        live.hook.setBinSize(live.key, binSize);
+        live.hook.createPool(live.key, Constants.SQRT_PRICE_1_1, binSize);
 
         uint256 b0 = t0.balanceOf(address(this));
         uint256 b1 = t1.balanceOf(address(this));
-        live.hook.addLiquidity(
-            live.key,
-            BaseCustomAccounting.AddLiquidityParams({
-                amount0Desired: 100 ether,
-                amount1Desired: 100 ether,
-                amount0Min: 0,
-                amount1Min: 0,
-                deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
-                userInputSalt: bytes32(0)
-            })
-        );
+        live.hook
+            .addLiquidity(
+                live.key,
+                BaseCustomAccounting.AddLiquidityParams({
+                    amount0Desired: 100 ether,
+                    amount1Desired: 100 ether,
+                    amount0Min: 0,
+                    amount1Min: 0,
+                    deadline: block.timestamp,
+                    tickLower: 0,
+                    tickUpper: 0,
+                    userInputSalt: bytes32(0)
+                })
+            );
         live.reserve0 = b0 - t0.balanceOf(address(this));
         live.reserve1 = b1 - t1.balanceOf(address(this));
     }

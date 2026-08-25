@@ -1,17 +1,17 @@
-'use client'
+"use client";
 
-import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 
 const links = [
-  { href: '/', label: 'Swap' },
-  { href: '/liquidity', label: 'Liquidity' },
-  { href: '/portfolio', label: 'Portfolio' },
-  { href: '/faucet', label: 'Faucet' },
-]
+  { href: "/", label: "Swap" },
+  { href: "/liquidity", label: "Liquidity" },
+  { href: "/portfolio", label: "Portfolio" },
+  { href: "/faucet", label: "Faucet" },
+];
 
 export function Header() {
-  const pathname = usePathname()
+  const pathname = usePathname();
 
   return (
     <header className="site-header">
@@ -21,12 +21,13 @@ export function Header() {
 
       <nav className="nav" aria-label="Primary">
         {links.map((l) => {
-          const active = l.href === '/' ? pathname === '/' || pathname === '/swap' : pathname === l.href
+          const active =
+            l.href === "/" ? pathname === "/" || pathname === "/swap" : pathname === l.href;
           return (
-            <Link key={l.href} href={l.href} className={active ? 'nav-link active' : 'nav-link'}>
+            <Link key={l.href} href={l.href} className={active ? "nav-link active" : "nav-link"}>
               {l.label}
             </Link>
-          )
+          );
         })}
       </nav>
 
@@ -35,5 +36,5 @@ export function Header() {
         <appkit-button />
       </div>
     </header>
-  )
+  );
 }
