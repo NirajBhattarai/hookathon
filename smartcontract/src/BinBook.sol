@@ -105,9 +105,6 @@ contract BinBook is BaseCustomCurve {
 
     mapping(PoolId poolId => uint256) private _lastSwapFee;
 
-    /// @dev Explicit per-add ramp stashed by addLiquidityWithRamp; consumed and cleared by _getAmountIn.
-    uint16 private transient _userRamp;
-
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -133,8 +130,6 @@ contract BinBook is BaseCustomCurve {
     error InsufficientShares();
     error InitializeViaCreatePool();
     error InvalidHook();
-    error InvalidRamp(uint256 minRequired);
-    error RampInUse();
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -190,7 +185,7 @@ contract BinBook is BaseCustomCurve {
         PoolId id = key.toId();
         if (params.amount0Desired == 0 && params.amount1Desired == 0) revert ZeroAmounts();
 
-        BinWindow memory w = _windowFor(id, params.tickLower, params.tickUpper, _consumeUserRamp());
+        BinWindow memory w = _windowFor(id, params.tickLower, params.tickUpper);
         uint256 LBase = _previewLBase(id, w, params.amount0Desired, params.amount1Desired);
         (amount0, amount1) = _applyLBase(id, w, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
         shares = amount0 + amount1;
@@ -300,50 +295,6 @@ contract BinBook is BaseCustomCurve {
     /*//////////////////////////////////////////////////////////////
                                USER ACTIONS
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Adds liquidity with an explicit linear-decay ramp controlling how the deposit spreads across bins.
-    /// @dev Mirrors {BaseCustomAccounting-addLiquidity}, passing `ramp` to _windowFor via transient storage.
-    ///      Larger ramps flatten the distribution toward uniform; smaller ramps concentrate it near the active
-    ///      bin. For a custom tick range the ramp must be at least the farthest bin distance + 1 so every bin
-    ///      receives liquidity, otherwise the call reverts. Plain addLiquidity keeps legacy behavior.
-    /// @param key The pool key
-    /// @param params Standard add-liquidity parameters
-    /// @param ramp Decay horizon in bins; must be > 0
-    /// @return delta The principal delta of the liquidity addition
-    function addLiquidityWithRamp(PoolKey calldata key, AddLiquidityParams calldata params, uint16 ramp)
-        external
-        payable
-        ensure(params.deadline)
-        returns (BalanceDelta delta)
-    {
-        PoolId id = key.toId();
-        if (!initializedPools[id]) revert PoolNotInitialized();
-        if (_userRamp != 0) revert RampInUse();
-        if (ramp == 0) revert InvalidRamp(0);
-        _userRamp = ramp;
-
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(id);
-        if (sqrtPriceX96 == 0) revert PoolNotInitialized();
-
-        bool isNative = key.currency0.isAddressZero();
-        if (!isNative && msg.value > 0) revert InvalidNativeValue();
-
-        // Ramp consumed inside _windowFor via _getAmountIn.
-        (bytes memory modifyParams, uint256 shares) = _getAddLiquidity(key, sqrtPriceX96, params);
-        (BalanceDelta callerDelta, BalanceDelta feesAccrued) = _modifyLiquidity(key, modifyParams);
-        _mint(key, params, callerDelta, feesAccrued, shares);
-
-        delta = callerDelta - feesAccrued;
-        uint128 amount0 = uint128(-delta.amount0());
-        if (amount0 < params.amount0Min || uint128(-delta.amount1()) < params.amount1Min) revert TooMuchSlippage();
-
-        if (isNative) {
-            if (msg.value < amount0) revert InvalidNativeValue();
-            key.currency0.transfer(msg.sender, msg.value - amount0);
-        }
-
-        _userRamp = 0;
-    }
 
     /// @notice Realize and pay accrued swap fees for `msg.sender` across their bins in `key`.
     function collectFees(PoolKey calldata key) external returns (uint256 amount0, uint256 amount1) {
@@ -615,14 +566,9 @@ contract BinBook is BaseCustomCurve {
         else feeGrowth1X128[id][idx] += delta;
     }
 
-    /// @dev `tickLower >= tickUpper` (including 0,0) keeps the default near-spot window.
-    ///      `userRamp` (from addLiquidityWithRamp) overrides the decay when nonzero; custom ranges
-    ///      require `userRamp >= farthestDistance + 1` so every bin in the range stays funded.
-    function _windowFor(PoolId id, int24 tickLower, int24 tickUpper, uint16 userRamp)
-        internal
-        view
-        returns (BinWindow memory w)
-    {
+    /// @dev `tickLower >= tickUpper` (including 0,0) keeps the default near-spot window with the book's
+    ///      ramp. Custom ranges auto-floor the ramp at `farthestDistance + 1` so every bin gets funded.
+    function _windowFor(PoolId id, int24 tickLower, int24 tickUpper) internal view returns (BinWindow memory w) {
         Book storage b = books[id];
         (int24 defMin, int24 defMax, int24 cur) = _binRange(id);
         w.cur = cur;
@@ -630,7 +576,7 @@ contract BinBook is BaseCustomCurve {
         if (tickLower >= tickUpper) {
             w.minB = defMin;
             w.maxB = defMax;
-            w.ramp = userRamp != 0 ? userRamp : b.ramp;
+            w.ramp = b.ramp;
             return w;
         }
 
@@ -647,13 +593,7 @@ contract BinBook is BaseCustomCurve {
 
         w.minB = userMin;
         w.maxB = userMax;
-        if (userRamp != 0) {
-            uint256 minRequired = _rampFor(userMin, userMax, cur, 1);
-            if (userRamp < minRequired) revert InvalidRamp(minRequired);
-            w.ramp = userRamp;
-        } else {
-            w.ramp = _rampFor(userMin, userMax, cur, b.ramp);
-        }
+        w.ramp = _rampFor(userMin, userMax, cur, b.ramp);
     }
 
     function _rampFor(int24 minB, int24 maxB, int24 cur, uint16 baseRamp) internal pure returns (uint256 ramp) {
@@ -662,12 +602,6 @@ contract BinBook is BaseCustomCurve {
         uint256 farthest = dLo > dHi ? dLo : dHi;
         ramp = farthest + 1;
         if (ramp < baseRamp) ramp = baseRamp;
-    }
-
-    /// @dev Reads and clears the transient per-add ramp (0 when absent).
-    function _consumeUserRamp() private returns (uint16 ramp) {
-        ramp = _userRamp;
-        _userRamp = 0;
     }
 
     function _expandBook(PoolId id, int24 fillMin, int24 fillMax, int24 cur) internal {

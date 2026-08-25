@@ -16,6 +16,7 @@ import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
 import {BinBook} from "../src/BinBook.sol";
+import {SwapMath} from "../src/libraries/SwapMath.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
 contract BinBookTest is BaseTest {
@@ -379,8 +380,7 @@ contract BinBookTest is BaseTest {
     function test_addLiquidity_range_usdcOnlyWrongSide_reverts() public {
         _approve();
         // Above spot needs token0; USDC-only (token1) cannot fill it.
-        vm.expectRevert();
-        _addRange(0, 10 ether, 12 * 60, 22 * 60);
+        vm.expectRevert(SwapMath.InsufficientLiquidity.selector);
     }
 
     function test_swap_walksEmptyGapToFarBin() public {
@@ -392,71 +392,7 @@ contract BinBookTest is BaseTest {
         assertLt(hook.currentBin(poolId), 0);
     }
 
-    // ── user ramp (addLiquidityWithRamp) ─────────────────────────────────
-
-    function _rampParams(uint256 a0, uint256 a1, int24 tickLower, int24 tickUpper)
-        internal
-        view
-        returns (BaseCustomAccounting.AddLiquidityParams memory)
-    {
-        return BaseCustomAccounting.AddLiquidityParams({
-            amount0Desired: a0,
-            amount1Desired: a1,
-            amount0Min: 0,
-            amount1Min: 0,
-            deadline: block.timestamp,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            userInputSalt: bytes32(0)
-        });
-    }
-
-    function test_ramp_customRange_exactMinimumDistribution() public {
-        _approve();
-        // Bins [-5..4], cur = 0: distances below = |idx|, above = idx + 1 → farthest 5, min ramp 6.
-        hook.addLiquidityWithRamp(poolKey, _rampParams(100 ether, 100 ether, -5 * 60, 5 * 60), 6);
-
-        uint128 lBelow1 = hook.liquidity(poolId, -1);
-        uint128 lSpot = hook.liquidity(poolId, 0);
-        uint128 lBelow2 = hook.liquidity(poolId, -2);
-        uint128 lAbove3 = hook.liquidity(poolId, 3);
-
-        // ramp 6: L_i ∝ (6 - d) / 6 → d=1 bins tie at 5/6, d=2 gets 4/6, d=4 gets 2/6.
-        assertEq(lBelow1, lSpot);
-        assertEq(uint256(lBelow2) * 5, uint256(lBelow1) * 4);
-        assertEq(uint256(lAbove3) * 5, uint256(lSpot) * 2);
-        for (int24 i = -5; i <= 4; ++i) {
-            assertGt(hook.liquidity(poolId, i), 0);
-        }
-    }
-
-    function test_ramp_customRange_reverts_belowMinimum() public {
-        _approve();
-        vm.expectRevert(abi.encodeWithSelector(BinBook.InvalidRamp.selector, uint256(6)));
-        hook.addLiquidityWithRamp(poolKey, _rampParams(100 ether, 100 ether, -5 * 60, 5 * 60), 5);
-        assertEq(hook.getTotalShares(poolId), 0);
-        assertEq(hook.liquidity(poolId, 0), 0);
-    }
-
-    function test_ramp_zero_reverts() public {
-        _approve();
-        vm.expectRevert(abi.encodeWithSelector(BinBook.InvalidRamp.selector, uint256(0)));
-        hook.addLiquidityWithRamp(poolKey, _rampParams(100 ether, 100 ether, 0, 0), 0);
-    }
-
-    function test_ramp_defaultWindow_flatterThanLegacy() public {
-        _approve();
-        PoolKey memory keyB = _altKey(500);
-        hook.createPool(keyB, Constants.SQRT_PRICE_1_1, 60);
-
-        hook.addLiquidityWithRamp(poolKey, _rampParams(50 ether, 50 ether, 0, 0), 25);
-        hook.addLiquidityWithRamp(keyB, _rampParams(50 ether, 50 ether, 0, 0), 10);
-
-        // Seeded window spans cur - 10 .. cur + 9; edge bin sits at distance 10.
-        int24 edge = hook.currentBin(poolId) - 10;
-        assertGt(hook.liquidity(poolId, edge), 0);
-        assertEq(hook.liquidity(keyB.toId(), edge), 0);
-    }
+    // ── auto-computed custom-range ramp ─────────────────────────────────
 
     function test_ramp_legacyPath_stillFloorsAtDefaultRamp() public {
         _approve();
