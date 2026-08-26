@@ -12,6 +12,7 @@ import {Constants} from "./utils/Constants.sol";
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 
 import {BinBook} from "../src/BinBook.sol";
+import {BinLayout} from "../src/libraries/BinLayout.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
@@ -168,7 +169,7 @@ contract BinBookLiquidityTest is BaseTest {
 
         hook.createPool(key, Constants.SQRT_PRICE_1_1, 10);
 
-        vm.expectRevert(BinBook.TicksNotAlignedToBins.selector);
+        vm.expectRevert(BinLayout.TicksNotAlignedToBins.selector);
         hook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -234,7 +235,7 @@ contract BinBookLiquidityTest is BaseTest {
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
 
-        vm.expectRevert(BinBook.InvalidTickRange.selector);
+        vm.expectRevert(BinLayout.InvalidTickRange.selector);
         hook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -267,7 +268,7 @@ contract BinBookLiquidityTest is BaseTest {
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
 
-        vm.expectRevert(BinBook.InvalidTickRange.selector);
+        vm.expectRevert(BinLayout.InvalidTickRange.selector);
         hook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -300,7 +301,7 @@ contract BinBookLiquidityTest is BaseTest {
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
 
-        vm.expectRevert(BinBook.InvalidTickRange.selector);
+        vm.expectRevert(BinLayout.InvalidTickRange.selector);
         hook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -333,7 +334,7 @@ contract BinBookLiquidityTest is BaseTest {
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
 
-        vm.expectRevert(BinBook.InvalidTickRange.selector);
+        vm.expectRevert(BinLayout.InvalidTickRange.selector);
         hook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -366,7 +367,7 @@ contract BinBookLiquidityTest is BaseTest {
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
 
-        vm.expectRevert(BinBook.InvalidTickRange.selector);
+        vm.expectRevert(BinLayout.InvalidTickRange.selector);
         hook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -382,7 +383,7 @@ contract BinBookLiquidityTest is BaseTest {
         );
     }
 
-    function test_addLiquidity() public {
+    function test_addLiquidity_memeLaunch_spreadsAcrossBins() public {
         BinBook hook = BinBook(flags);
 
         Currency currencyA = deployCurrency();

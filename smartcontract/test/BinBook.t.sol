@@ -17,6 +17,7 @@ import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCus
 
 import {BinBook} from "../src/BinBook.sol";
 import {SwapMath} from "../src/libraries/SwapMath.sol";
+import {BinLayout} from "../src/libraries/BinLayout.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
 contract BinBookTest is BaseTest {
@@ -367,14 +368,14 @@ contract BinBookTest is BaseTest {
 
     function test_addLiquidity_range_reverts_misaligned() public {
         _approve();
-        vm.expectRevert(BinBook.TicksNotAlignedToBins.selector);
+        vm.expectRevert(BinLayout.TicksNotAlignedToBins.selector);
         _addRange(0, 1 ether, -181, -60);
     }
 
     function test_addLiquidity_range_reverts_tooManyBins() public {
         _approve();
         // 65 bins of size 60
-        vm.expectRevert(BinBook.TooManyBins.selector);
+        vm.expectRevert(BinLayout.TooManyBins.selector);
         _addRange(0, 1 ether, -65 * 60, 0);
     }
 

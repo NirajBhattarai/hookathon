@@ -464,6 +464,24 @@ library SwapMath {
         return price;
     }
 
+    /// @notice Compute token amounts required to fund liquidity `L` within a single price bin.
+    /// @dev Standard Uniswap v3 concentrated-liquidity formulas for a bin spanning [sqrtLo, sqrtHi]:
+    ///
+    ///      Case 1 — price at or below bin (sqrtPriceCurrent ≤ sqrtLo):
+    ///        All liquidity is above the current price → only token0 needed.
+    ///        token0 = L × (1/√lo − 1/√hi) × Q96
+    ///             rewritten as L × (Q96²/√lo − Q96²/√hi) / Q96
+    ///
+    ///      Case 2 — price at or above bin (sqrtPriceCurrent ≥ sqrtHi):
+    ///        All liquidity is below the current price → only token1 needed.
+    ///        token1 = L × (√hi − √lo) / Q96
+    ///
+    ///      Case 3 — price inside the bin (sqrtLo < sqrtPriceCurrent < sqrtHi):
+    ///        Liquidity straddles the price → both tokens needed.
+    ///        token0 = L × (1/√P − 1/√hi) × Q96   (left side of price, above √P)
+    ///        token1 = L × (√P − √lo) / Q96         (right side of price, below √P)
+    ///
+    ///      Where L = liquidity (the x·y = L² invariant), Q96 = 2^96 (fixed-point scale).
     function getTokenAmountsForBin(uint256 L, uint256 sqrtPriceCurrent, BinBounds memory bounds)
         internal
         pure
