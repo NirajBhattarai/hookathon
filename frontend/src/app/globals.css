@@ -242,91 +242,6 @@ input {
   }
 }
 
-.chart-panel {
-  background: var(--bg-elevated);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
-}
-
-.chart-panel.preview {
-  border-style: dashed;
-  border-color: color-mix(in oklab, var(--warn) 40%, var(--line));
-}
-
-.chart-panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.75rem;
-}
-
-.chart-tf-group {
-  display: flex;
-  gap: 0.2rem;
-  padding: 0.2rem;
-  background: var(--bg-input);
-  border-radius: 999px;
-  border: 1px solid var(--line);
-}
-
-.chart-tf {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  padding: 0.32rem 0.75rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.chart-tf.active {
-  background: var(--bg-elevated);
-  color: var(--ink);
-}
-
-.chart-refresh {
-  appearance: none;
-  border: 1px solid var(--line);
-  background: var(--bg-input);
-  color: var(--muted);
-  width: 2rem;
-  height: 2rem;
-  border-radius: 0.6rem;
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  font-size: 1rem;
-}
-
-.chart-refresh:hover:not(:disabled) {
-  color: var(--ink);
-  border-color: var(--line-strong);
-}
-
-.chart-canvas-wrap {
-  position: relative;
-}
-
-.chart-canvas {
-  height: 380px;
-  width: 100%;
-}
-
-.chart-empty {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  font-size: 0.85rem;
-  text-align: center;
-  padding: 0 2rem;
-  pointer-events: none;
-}
-
 /* ——— Liquidity ladder ——— */
 .ladder-panel {
   display: flex;
@@ -430,70 +345,9 @@ input {
   font-weight: 600;
 }
 
-/* ——— Trade view tabs ——— */
-.trade-tabs {
-  display: flex;
-  gap: 0.2rem;
-  padding: 0.2rem;
-  background: var(--bg-input);
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  width: fit-content;
-  margin-bottom: 0.85rem;
-}
-
-.trade-tab {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  padding: 0.4rem 1rem;
-  border-radius: 999px;
-  font-size: 0.82rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.trade-tab.active {
-  background: var(--bg-elevated);
-  color: var(--ink);
-}
-
 /* ——— Stats bar sparkline ——— */
 .stats-bar-spark {
   flex-shrink: 0;
-}
-
-/* ——— Activity table ——— */
-.activity-table-wrap {
-  overflow-x: auto;
-}
-
-.activity-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-}
-
-.activity-table th {
-  text-align: left;
-  color: var(--muted-2);
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-.activity-table td {
-  padding: 0.55rem 0.6rem;
-  border-bottom: 1px solid color-mix(in oklab, var(--line) 55%, transparent);
-  white-space: nowrap;
-}
-
-.activity-table tr:last-child td {
-  border-bottom: 0;
 }
 
 .tabular {
@@ -1336,11 +1190,6 @@ input {
   border-radius: var(--radius);
 }
 
-.pair-slash {
-  color: var(--muted-2);
-  font-weight: 600;
-}
-
 .pool-status {
   display: flex;
   align-items: center;
@@ -1609,30 +1458,6 @@ input {
   margin: 0;
   font-size: 0.95rem;
   font-weight: 600;
-}
-
-.token-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.35rem 0.6rem;
-  border-radius: 999px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--line-strong);
-  font-weight: 600;
-  font-size: 0.85rem;
-  white-space: nowrap;
-}
-
-.token-tag .dot {
-  width: 0.6rem;
-  height: 0.6rem;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.token-tag .dot.alt {
-  background: #6ea8ff;
 }
 
 .plus-divider {

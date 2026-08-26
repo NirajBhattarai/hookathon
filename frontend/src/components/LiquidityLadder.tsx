@@ -2,13 +2,9 @@
 
 import { useMemo } from "react";
 import { useBinLiquidity } from "@/hooks/useBinLiquidity";
-import { tickToPrice } from "@/lib/priceMath";
+import { formatPriceHuman, tickToPrice } from "@/lib/priceMath";
 
 const WINDOW_HALF = 8;
-
-function fmtPrice(p: number): string {
-  return p >= 1 ? p.toFixed(4) : p.toPrecision(4);
-}
 
 export function LiquidityLadder() {
   const { book, preview, series, maxL } = useBinLiquidity();
@@ -51,7 +47,7 @@ export function LiquidityLadder() {
         {ordered.map((b) => {
           const active = b.binIndex === book.currentBin;
           const pct = maxL === 0n ? 0 : Number((b.liquidity * 10000n) / maxL) / 100;
-          const price = fmtPrice(tickToPrice(b.tickLower));
+          const price = formatPriceHuman(tickToPrice(b.tickLower));
 
           if (active) {
             return (

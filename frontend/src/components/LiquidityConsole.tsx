@@ -23,7 +23,7 @@ import {
   DEFAULT_RAMP,
   tickAtBin,
 } from "@/lib/bins";
-import { priceToSqrtPriceX96, sqrtPriceX96ToPrice } from "@/lib/priceMath";
+import { formatPriceHuman, priceToSqrtPriceX96, sqrtPriceX96ToPrice } from "@/lib/priceMath";
 import type { FaucetToken } from "@/lib/tokens";
 
 const erc20Abi = [
@@ -71,12 +71,7 @@ const poolManagerAbi = [
 
 type Shape = "auto" | "tight" | "wide" | "full" | "custom";
 
-/** Tiered formatting so very small/large prices don't round away to "0". */
-function fmtPrice(p: number): string {
-  if (p >= 1) return p.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  if (p >= 0.0001) return p.toFixed(6);
-  return p.toExponential(2);
-}
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
 /** Formats a linked-input amount, trimming float noise without forcing trailing zeros. */
 function trimDecimal(n: number): string {
@@ -85,16 +80,18 @@ function trimDecimal(n: number): string {
 }
 
 function TokenAmountField({
-  label,
-  dotClass,
+  tokenAddress,
+  onSelectToken,
+  extraTokens,
   amount,
   onAmount,
   balance,
   decimals,
   disabled,
 }: {
-  label: string;
-  dotClass?: string;
+  tokenAddress: Address;
+  onSelectToken: (a: Address) => void;
+  extraTokens?: FaucetToken[];
   amount: string;
   onAmount: (v: string) => void;
   balance?: bigint;
@@ -104,10 +101,7 @@ function TokenAmountField({
   return (
     <div className={disabled ? "token-field disabled" : "token-field"}>
       <div className="token-field-top">
-        <span className="token-tag">
-          <span className={dotClass ? `dot ${dotClass}` : "dot"} />
-          {label}
-        </span>
+        <TokenSelect value={tokenAddress} onSelect={onSelectToken} extraTokens={extraTokens} />
         <div className="balance-row">
           <span>
             Balance{" "}
@@ -162,14 +156,15 @@ export function LiquidityConsole() {
   const pair = baseAddr && quoteAddr ? { token0: baseAddr, token1: quoteAddr } : undefined;
   const pairInvalid = !!baseAddr && !!quoteAddr && baseAddr.toLowerCase() === quoteAddr.toLowerCase();
 
-  function selectBase(a: Address) {
-    if (quoteAddr && a.toLowerCase() === quoteAddr.toLowerCase()) setQuoteAddr(baseAddr);
-    setBaseAddr(a);
-    resetRange();
-  }
-  function selectQuote(a: Address) {
-    if (baseAddr && a.toLowerCase() === baseAddr.toLowerCase()) setBaseAddr(quoteAddr);
-    setQuoteAddr(a);
+  // Picking a token already on the other side swaps instead of duplicating it.
+  function selectAt(slot: "base" | "quote", a: Address) {
+    if (slot === "base") {
+      if (quoteAddr && a.toLowerCase() === quoteAddr.toLowerCase()) setQuoteAddr(baseAddr);
+      setBaseAddr(a);
+    } else {
+      if (baseAddr && a.toLowerCase() === baseAddr.toLowerCase()) setBaseAddr(quoteAddr);
+      setQuoteAddr(a);
+    }
     resetRange();
   }
 
@@ -210,6 +205,12 @@ export function LiquidityConsole() {
 
   const base = useTokenMeta(key?.currency0);
   const quote = useTokenMeta(key?.currency1);
+
+  // currency0/currency1 are address-sorted, so whichever of base/quote picked "first" can land on
+  // either side — track which picker slot each deposit field's token actually corresponds to.
+  const currency0Slot: "base" | "quote" =
+    key && baseAddr && key.currency0.toLowerCase() === baseAddr.toLowerCase() ? "base" : "quote";
+  const currency1Slot: "base" | "quote" = currency0Slot === "base" ? "quote" : "base";
 
   const [amount0, setAmount0] = useState("1");
   const [amount1, setAmount1] = useState("1");
@@ -462,15 +463,9 @@ export function LiquidityConsole() {
       <StatsBar />
 
       <div className="console-topbar">
-        {baseAddr && quoteAddr ? (
-          <>
-            <TokenSelect value={baseAddr} onSelect={selectBase} extraTokens={extraTokens} />
-            <span className="pair-slash">/</span>
-            <TokenSelect value={quoteAddr} onSelect={selectQuote} extraTokens={extraTokens} />
-          </>
-        ) : (
-          <span className="muted tiny">Loading pair…</span>
-        )}
+        <span className="mono">
+          {base.symbol ?? "…"} / {quote.symbol ?? "…"}
+        </span>
         <span className="fee-badge mono">
           {((deployment?.poolFee ?? 3000) / 10000).toFixed(2)}% fee
         </span>
@@ -530,7 +525,7 @@ export function LiquidityConsole() {
             </div>
             {bookPrice !== null && !showDemo && (
               <span className="ramp-price-chip mono">
-                1 {base.symbol ?? "token0"} = {fmtPrice(bookPrice)} {quote.symbol ?? "token1"}
+                1 {base.symbol ?? "token0"} = {formatPriceHuman(bookPrice)} {quote.symbol ?? "token1"}
               </span>
             )}
           </div>
@@ -668,7 +663,9 @@ export function LiquidityConsole() {
           )}
 
           <TokenAmountField
-            label={base.symbol ?? "…"}
+            tokenAddress={key?.currency0 ?? baseAddr ?? ZERO_ADDRESS}
+            onSelectToken={(a) => selectAt(currency0Slot, a)}
+            extraTokens={extraTokens}
             amount={amount0}
             onAmount={handleAmount0Change}
             balance={bal0}
@@ -681,8 +678,9 @@ export function LiquidityConsole() {
           </div>
 
           <TokenAmountField
-            label={quote.symbol ?? "…"}
-            dotClass="alt"
+            tokenAddress={key?.currency1 ?? quoteAddr ?? ZERO_ADDRESS}
+            onSelectToken={(a) => selectAt(currency1Slot, a)}
+            extraTokens={extraTokens}
             amount={amount1}
             onAmount={handleAmount1Change}
             balance={bal1}
@@ -707,7 +705,7 @@ export function LiquidityConsole() {
                     : composition.mode === "below"
                       ? `${quote.symbol ?? "token1"} only`
                       : composition.mode === "straddle"
-                        ? `1 : ${fmtPrice(composition.need1 / composition.need0)}`
+                        ? `1 : ${formatPriceHuman(composition.need1 / composition.need0)}`
                         : "—"}
                 </span>
               </div>

@@ -15,6 +15,9 @@ createAppKit({
   features: {
     analytics: false,
   },
+  // Skips the Base Account connector's own import/init entirely — no dynamic import, no console
+  // error — instead of letting it fail and get caught by @reown's own try/catch.
+  enableBaseAccount: false,
   themeMode: "dark",
 });
 

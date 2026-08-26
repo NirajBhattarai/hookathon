@@ -17,3 +17,30 @@ export function sqrtPriceX96ToPrice(sqrtP: bigint): number {
 export function tickToPrice(tick: number): number {
   return 1.0001 ** tick;
 }
+
+const SUBSCRIPT_DIGITS = ["₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"];
+
+function toSubscript(n: number): string {
+  return String(n)
+    .split("")
+    .map((d) => SUBSCRIPT_DIGITS[Number(d)])
+    .join("");
+}
+
+/**
+ * Human-readable price, Uniswap-style: normal decimals down to 0.0001, then compact
+ * "0.0₈2018" notation (the subscript is the zero count) instead of "2.018e-9" — reads at a
+ * glance instead of requiring the reader to count exponent digits.
+ */
+export function formatPriceHuman(p: number, sigFigs = 4): string {
+  if (!Number.isFinite(p) || p <= 0) return "0";
+  if (p >= 1000) return p.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (p >= 1) return p.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  if (p >= 0.0001) return p.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+
+  const exp = Math.floor(Math.log10(p));
+  const zeroCount = -exp - 1;
+  const mantissa = p / 10 ** exp;
+  const sig = mantissa.toPrecision(sigFigs).replace(".", "").slice(0, sigFigs);
+  return `0.0${toSubscript(zeroCount)}${sig}`;
+}

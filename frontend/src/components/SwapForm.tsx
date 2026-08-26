@@ -18,6 +18,7 @@ import {
 } from "wagmi";
 import { useDeployment } from "@/hooks/useDeployment";
 import { TokenSelect } from "@/components/TokenSelect";
+import { formatPriceHuman } from "@/lib/priceMath";
 import { findToken, tokenByAddress } from "@/lib/tokens";
 
 /**
@@ -530,11 +531,7 @@ export function SwapForm() {
         <summary>
           <span>
             1 {paySymbol ?? "?"} ≈{" "}
-            {fmtOut === "—"
-              ? "—"
-              : Number(fmtOut) / (Number(amountIn) || 1) >= 0.0001
-                ? (Number(fmtOut) / (Number(amountIn) || 1)).toFixed(6)
-                : (Number(fmtOut) / (Number(amountIn) || 1)).toExponential(2)}{" "}
+            {fmtOut === "—" ? "—" : formatPriceHuman(Number(fmtOut) / (Number(amountIn) || 1))}{" "}
             {recvSymbol ?? "?"}
           </span>
           <span>Details</span>
