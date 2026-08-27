@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {BinLayout} from "src/libraries/BinLayout.sol";
 import {SwapMath} from "src/libraries/SwapMath.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
 
 contract BinLayoutTest is Test {
     int24 internal constant SIZE = 10;
@@ -88,7 +90,7 @@ contract BinLayoutTest is Test {
 
     function _seedBook(int24 cur) internal {
         book.binSize = SIZE;
-        book.ramp = BASE_RAMP;
+        book.baseRamp = BASE_RAMP;
         book.seeded = true;
         book.currentBin = cur;
     }
@@ -121,7 +123,7 @@ contract BinLayoutTest is Test {
     function test_resolveWindow_unseededBookDerivesCurFromPrice() public {
         book.binSize = SIZE;
         book.numBinsPerSide = 10;
-        book.ramp = BASE_RAMP;
+        book.baseRamp = BASE_RAMP;
         book.seeded = false;
         book.sqrtPriceX96 = TickMath.getSqrtPriceAtTick(-115135); // lands mid-bin
 
@@ -207,6 +209,171 @@ contract BinLayoutTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                             EXPAND BOOK
+    //////////////////////////////////////////////////////////////*/
+
+    uint16 internal constant NUM_BINS_PER_SIDE = 10;
+
+    /// @dev Resets `book` to a fresh unseeded state so state from earlier fuzz runs on the
+    ///      same persistent storage slot can't leak into the next one.
+    function _freshBook(uint16 numBinsPerSide) internal {
+        delete book;
+        book.binSize = SIZE;
+        book.baseRamp = BASE_RAMP;
+        book.numBinsPerSide = numBinsPerSide;
+    }
+
+    /// @dev External hop so `vm.expectRevert` sees a revert at a lower call depth.
+    function expandBookExternal(int24 fillMin, int24 fillMax, int24 cur) external returns (int24, int24, bool) {
+        return book.expandBook(fillMin, fillMax, cur);
+    }
+
+    /// @dev First expansion on an unseeded book spreads `numBinsPerSide` bins around `cur`.
+    function test_expandBook_firstSeed_spreadsAroundCurrent() public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        (int24 minBin, int24 maxBin, bool expanded) = book.expandBook(0, 0, 5);
+
+        assertEq(minBin, 5 - int24(uint24(NUM_BINS_PER_SIDE)));
+        assertEq(maxBin, 5 + int24(uint24(NUM_BINS_PER_SIDE)) - 1);
+        assertTrue(expanded);
+        assertTrue(book.seeded);
+        assertEq(book.currentBin, 5);
+        assertEq(book.minBin, minBin);
+        assertEq(book.maxBin, maxBin);
+    }
+
+    /// @dev A fill window wider than the default spread wins on first seed.
+    function test_expandBook_firstSeed_fillWiderThanDefaultWins() public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        (int24 minBin, int24 maxBin,) = book.expandBook(-50, 50, 0);
+
+        assertEq(minBin, -50);
+        assertEq(maxBin, 50);
+    }
+
+    /// @dev A fill window fully inside the already-seeded range doesn't grow or emit.
+    function test_expandBook_noGrowth_withinExistingRange() public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        (int24 minBin0, int24 maxBin0,) = book.expandBook(0, 0, 0);
+
+        (int24 minBin1, int24 maxBin1, bool expanded) = book.expandBook(minBin0 + 1, maxBin0 - 1, 0);
+
+        assertFalse(expanded);
+        assertEq(minBin1, minBin0);
+        assertEq(maxBin1, maxBin0);
+    }
+
+    /// @dev A fill window reaching only below the current min grows only that side.
+    function test_expandBook_growLowOnly() public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        (int24 minBin0, int24 maxBin0,) = book.expandBook(0, 0, 0);
+
+        (int24 minBin1, int24 maxBin1, bool expanded) = book.expandBook(minBin0 - 5, maxBin0, 0);
+
+        assertTrue(expanded);
+        assertEq(minBin1, minBin0 - 5);
+        assertEq(maxBin1, maxBin0);
+    }
+
+    /// @dev A fill window reaching only above the current max grows only that side.
+    function test_expandBook_growHighOnly() public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        (int24 minBin0, int24 maxBin0,) = book.expandBook(0, 0, 0);
+
+        (int24 minBin1, int24 maxBin1, bool expanded) = book.expandBook(minBin0, maxBin0 + 5, 0);
+
+        assertTrue(expanded);
+        assertEq(minBin1, minBin0);
+        assertEq(maxBin1, maxBin0 + 5);
+    }
+
+    /// @dev A fill window wider on both sides grows both in the same call.
+    function test_expandBook_growBothSides() public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        (int24 minBin0, int24 maxBin0,) = book.expandBook(0, 0, 0);
+
+        (int24 minBin1, int24 maxBin1, bool expanded) = book.expandBook(minBin0 - 3, maxBin0 + 7, 0);
+
+        assertTrue(expanded);
+        assertEq(minBin1, minBin0 - 3);
+        assertEq(maxBin1, maxBin0 + 7);
+    }
+
+    /// @dev Growing past MAX_BOOK_BINS reverts instead of silently accepting an unswappable book.
+    function test_revert_expandBook_bookTooWide() public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        book.expandBook(0, 0, 0);
+
+        vm.expectRevert(BinLayout.BookTooWide.selector);
+        this.expandBookExternal(0, int24(uint24(BinLayout.MAX_BOOK_BINS)), 0);
+    }
+
+    /// @dev Mirror-reference fuzz for the first-seed transition (v4-core `Pool.t.sol` style):
+    ///      the expected range is the union of the fill window, `cur`, and the default spread.
+    function testFuzz_expandBook_firstSeed_matchesReference(
+        int24 rawCur,
+        uint16 rawLoOffset,
+        uint16 rawHiOffset,
+        uint16 rawNumBinsPerSide
+    ) public {
+        int24 cur = int24(bound(int256(rawCur), -DOMAIN, DOMAIN));
+        int24 loOffset = int24(int256(bound(uint256(rawLoOffset), 0, 400)));
+        int24 hiOffset = int24(int256(bound(uint256(rawHiOffset), 0, 400)));
+        uint16 n = uint16(bound(uint256(rawNumBinsPerSide), 1, 400));
+        int24 fillMin = cur - loOffset;
+        int24 fillMax = cur + hiOffset;
+
+        _freshBook(n);
+
+        int24 expMin = fillMin < cur ? fillMin : cur;
+        int24 expMax = fillMax > cur ? fillMax : cur;
+        int24 defMin = cur - int24(uint24(n));
+        int24 defMax = cur + int24(uint24(n)) - 1;
+        if (defMin < expMin) expMin = defMin;
+        if (defMax > expMax) expMax = defMax;
+
+        uint256 span = uint256(int256(expMax - expMin + 1));
+        vm.assume(span <= BinLayout.MAX_BOOK_BINS);
+
+        (int24 minBin, int24 maxBin, bool expanded) = book.expandBook(fillMin, fillMax, cur);
+
+        assertEq(minBin, expMin, "minBin");
+        assertEq(maxBin, expMax, "maxBin");
+        assertTrue(expanded, "first seed always expands");
+        assertTrue(book.seeded);
+        assertEq(book.currentBin, cur);
+    }
+
+    /// @dev Mirror-reference fuzz for the grow transition on an already-seeded book. Fuzzed
+    ///      inputs are budgeted so the resulting span never crosses MAX_BOOK_BINS — that cap is
+    ///      covered separately by `test_revert_expandBook_bookTooWide`.
+    function testFuzz_expandBook_grow_matchesReference(int24 rawFillMin, int24 rawFillMax, int24 rawCur) public {
+        _freshBook(NUM_BINS_PER_SIDE);
+        (int24 minBin0, int24 maxBin0,) = book.expandBook(0, 0, 0);
+
+        int24 initialSpan = maxBin0 - minBin0 + 1;
+        int24 slack = (int24(uint24(BinLayout.MAX_BOOK_BINS)) - initialSpan) / 2;
+        int24 lo = minBin0 - slack;
+        int24 hi = maxBin0 + slack;
+
+        int24 cur = int24(bound(int256(rawCur), int256(lo), int256(hi)));
+        int24 fillMin = int24(bound(int256(rawFillMin), int256(lo), int256(hi)));
+        int24 fillMax = int24(bound(int256(rawFillMax), int256(fillMin), int256(hi)));
+
+        int24 expMin = fillMin < cur ? fillMin : cur;
+        int24 expMax = fillMax > cur ? fillMax : cur;
+        if (minBin0 < expMin) expMin = minBin0;
+        if (maxBin0 > expMax) expMax = maxBin0;
+        bool expGrew = expMin < minBin0 || expMax > maxBin0;
+
+        (int24 minBin1, int24 maxBin1, bool expanded) = book.expandBook(fillMin, fillMax, cur);
+
+        assertEq(minBin1, expMin, "minBin");
+        assertEq(maxBin1, expMax, "maxBin");
+        assertEq(expanded, expGrew, "expanded");
+    }
+
+    /*//////////////////////////////////////////////////////////////
                             LIQUIDITY SOLVER
     //////////////////////////////////////////////////////////////*/
 
@@ -264,7 +431,7 @@ contract BinLayoutTest is Test {
         assertApproxEqRel(scaled, base * k, 1e9);
     }
 
-    /// @dev Bin sqrt-price bounds helper mirroring BinLayout.amountsFor's tick math.
+    /// @dev Bin sqrt-price bounds helper mirroring BinLayout.tokenAmountsForBin's tick math.
     function _bounds(int24 binIndex, int24 binSize) internal pure returns (SwapMath.BinBounds memory) {
         return SwapMath.BinBounds({
             sqrtPriceLower: uint256(TickMath.getSqrtPriceAtTick(binIndex * binSize)),
@@ -406,5 +573,158 @@ contract BinLayoutTest is Test {
         // Allow per-bin floor-rounding excess from probe-and-scale
         assertLe(amount0, a0 + a0 / 100_000, "token0 exceeds budget + rounding");
         assertLe(amount1, a1 + a1 / 100_000, "token1 exceeds budget + rounding");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              ADD USER L
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Pure liquidity bookkeeping — no fee growth involved, unlike `settleFees` below.
+    function test_increaseUserL_firstDeposit_setsRangeAndLiquidity() public {
+        BinLayout.UserRange storage r = _userRanges[USER];
+        BinLayout.increaseUserL(_positions[USER][5], r, _totalLiquidity, 5, 1000);
+
+        assertEq(_positions[USER][5].liquidity, 1000);
+        assertEq(_totalLiquidity[5], 1000);
+        assertEq(r.minB, 5);
+        assertEq(r.maxB, 5);
+        assertTrue(r.set);
+    }
+
+    /// @dev Repeated adds to the same bin accumulate on both the position and the bin total.
+    function test_increaseUserL_repeatedAdd_accumulates() public {
+        BinLayout.UserRange storage r = _userRanges[USER];
+        BinLayout.increaseUserL(_positions[USER][5], r, _totalLiquidity, 5, 1000);
+        BinLayout.increaseUserL(_positions[USER][5], r, _totalLiquidity, 5, 300);
+
+        assertEq(_positions[USER][5].liquidity, 1300);
+        assertEq(_totalLiquidity[5], 1300);
+        assertEq(r.minB, 5);
+        assertEq(r.maxB, 5);
+    }
+
+    /// @dev Adding to bins on both sides of the first widens the range to their min/max.
+    function test_increaseUserL_widensRangeAcrossBins() public {
+        BinLayout.UserRange storage r = _userRanges[USER];
+        BinLayout.increaseUserL(_positions[USER][5], r, _totalLiquidity, 5, 1000);
+        BinLayout.increaseUserL(_positions[USER][2], r, _totalLiquidity, 2, 500);
+        BinLayout.increaseUserL(_positions[USER][8], r, _totalLiquidity, 8, 700);
+
+        assertEq(r.minB, 2);
+        assertEq(r.maxB, 8);
+        assertEq(_positions[USER][2].liquidity, 500);
+        assertEq(_positions[USER][5].liquidity, 1000);
+        assertEq(_positions[USER][8].liquidity, 700);
+    }
+
+    /// @dev Mirror-reference fuzz: two adds to distinct bins land on their own position/total,
+    ///      and the range collapses to [min(bins), max(bins)] regardless of add order.
+    function testFuzz_increaseUserL_matchesReference(int24 binA, int24 binB, uint128 addA, uint128 addB) public {
+        vm.assume(binA != binB);
+        // Reset just the storage this run touches — mappings persist across fuzz runs.
+        delete _userRanges[USER];
+        delete _positions[USER][binA];
+        delete _positions[USER][binB];
+        _totalLiquidity[binA] = 0;
+        _totalLiquidity[binB] = 0;
+
+        BinLayout.UserRange storage r = _userRanges[USER];
+        BinLayout.increaseUserL(_positions[USER][binA], r, _totalLiquidity, binA, addA);
+        BinLayout.increaseUserL(_positions[USER][binB], r, _totalLiquidity, binB, addB);
+
+        assertEq(_positions[USER][binA].liquidity, addA, "position A");
+        assertEq(_positions[USER][binB].liquidity, addB, "position B");
+        assertEq(_totalLiquidity[binA], addA, "total A");
+        assertEq(_totalLiquidity[binB], addB, "total B");
+
+        int24 expMin = binA < binB ? binA : binB;
+        int24 expMax = binA > binB ? binA : binB;
+        assertEq(r.minB, expMin, "minB");
+        assertEq(r.maxB, expMax, "maxB");
+        assertTrue(r.set);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            FEE REALIZATION
+    //////////////////////////////////////////////////////////////*/
+
+    BinLayout.Position position;
+    int24 internal constant FEE_BIN = 0;
+
+    /// @dev Growth since the last checkpoint is settled into tokensOwed, and the checkpoint
+    ///      advances to the bin's current growth.
+    function test_settleFees_settlesAccruedGrowth() public {
+        position.liquidity = 1000;
+        _feeGrowth0[FEE_BIN] = 10 * FixedPoint128.Q128;
+        _feeGrowth1[FEE_BIN] = 4 * FixedPoint128.Q128;
+
+        BinLayout.settleFees(position, _feeGrowth0, _feeGrowth1, FEE_BIN);
+
+        assertEq(position.tokensOwed0, 10_000, "owed0 = growth * L");
+        assertEq(position.tokensOwed1, 4000, "owed1 = growth * L");
+        assertEq(position.feeGrowth0LastX128, 10 * FixedPoint128.Q128, "checkpoint0 advances");
+        assertEq(position.feeGrowth1LastX128, 4 * FixedPoint128.Q128, "checkpoint1 advances");
+    }
+
+    /// @dev Re-touching a position with no new growth (e.g. a same-block second call) is a
+    ///      no-op on tokensOwed — this is the branch the tokensOwed-write guard skips.
+    function test_settleFees_noNewGrowth_isIdempotent() public {
+        position.liquidity = 1000;
+        _feeGrowth0[FEE_BIN] = 10 * FixedPoint128.Q128;
+        _feeGrowth1[FEE_BIN] = 4 * FixedPoint128.Q128;
+        BinLayout.settleFees(position, _feeGrowth0, _feeGrowth1, FEE_BIN);
+
+        BinLayout.settleFees(position, _feeGrowth0, _feeGrowth1, FEE_BIN);
+
+        assertEq(position.tokensOwed0, 10_000, "unchanged: nothing new accrued");
+        assertEq(position.tokensOwed1, 4000, "unchanged: nothing new accrued");
+        assertEq(position.feeGrowth0LastX128, 10 * FixedPoint128.Q128);
+        assertEq(position.feeGrowth1LastX128, 4 * FixedPoint128.Q128);
+    }
+
+    /// @dev A fresh (zero-liquidity) position accrues nothing but still gets its checkpoint
+    ///      initialized to the bin's current growth.
+    function test_settleFees_freshPosition_onlyInitializesCheckpoint() public {
+        _feeGrowth0[FEE_BIN] = 7 * FixedPoint128.Q128;
+        _feeGrowth1[FEE_BIN] = 2 * FixedPoint128.Q128;
+
+        BinLayout.settleFees(position, _feeGrowth0, _feeGrowth1, FEE_BIN);
+
+        assertEq(position.tokensOwed0, 0, "no liquidity to have accrued anything");
+        assertEq(position.tokensOwed1, 0, "no liquidity to have accrued anything");
+        assertEq(position.feeGrowth0LastX128, 7 * FixedPoint128.Q128);
+        assertEq(position.feeGrowth1LastX128, 2 * FixedPoint128.Q128);
+    }
+
+    /// @dev Mirror-reference fuzz covering both the accrual path and the no-op-write-skip path
+    ///      (growth0After == growth0Before / growth1After == growth1Before draws are common
+    ///      under `bound`'s inclusive range, exercising the guard added in `settleFees`).
+    function testFuzz_settleFees_matchesReference(
+        uint128 liquidity,
+        uint128 growth0Before,
+        uint128 growth0After,
+        uint128 growth1Before,
+        uint128 growth1After
+    ) public {
+        growth0After = uint128(bound(growth0After, growth0Before, type(uint128).max));
+        growth1After = uint128(bound(growth1After, growth1Before, type(uint128).max));
+
+        position.liquidity = liquidity;
+        position.feeGrowth0LastX128 = growth0Before;
+        position.feeGrowth1LastX128 = growth1Before;
+        _feeGrowth0[FEE_BIN] = growth0After;
+        _feeGrowth1[FEE_BIN] = growth1After;
+
+        uint256 expOwed0 =
+            liquidity == 0 ? 0 : FullMath.mulDiv(growth0After - growth0Before, liquidity, FixedPoint128.Q128);
+        uint256 expOwed1 =
+            liquidity == 0 ? 0 : FullMath.mulDiv(growth1After - growth1Before, liquidity, FixedPoint128.Q128);
+
+        BinLayout.settleFees(position, _feeGrowth0, _feeGrowth1, FEE_BIN);
+
+        assertEq(position.tokensOwed0, expOwed0, "owed0");
+        assertEq(position.tokensOwed1, expOwed1, "owed1");
+        assertEq(position.feeGrowth0LastX128, growth0After, "checkpoint0");
+        assertEq(position.feeGrowth1LastX128, growth1After, "checkpoint1");
     }
 }

@@ -51,7 +51,8 @@ contract BinBook is BaseCustomCurve {
     uint16 public constant DEFAULT_RAMP = 10;
     uint16 public constant DEFAULT_BINS_PER_SIDE = 10;
     /// @dev Cap on the contiguous book. Swaps load every bin in `[minBin, maxBin]`.
-    uint16 public constant MAX_BOOK_BINS = 1024;
+    ///      Re-exported from `BinLayout` (single source of truth) to keep the public getter.
+    uint16 public constant MAX_BOOK_BINS = BinLayout.MAX_BOOK_BINS;
 
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
@@ -92,7 +93,6 @@ contract BinBook is BaseCustomCurve {
     error ExactOutputNotSupported();
     error ZeroAmounts();
     error InsufficientShares();
-    error BookTooWide();
     error InitializeViaCreatePool();
     error InvalidHook();
 
@@ -152,9 +152,9 @@ contract BinBook is BaseCustomCurve {
 
         BinLayout.Window memory window = books[id].resolveWindow(params.tickLower, params.tickUpper);
 
-        uint256 LBase = books[id].solveLBase(window, params.amount0Desired, params.amount1Desired);
-        if (LBase == 0) revert ZeroAmounts();
-        (amount0, amount1) = _depositLBase(id, window, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
+        uint256 lBase = books[id].solveLBase(window, params.amount0Desired, params.amount1Desired);
+        if (lBase == 0) revert ZeroAmounts();
+        (amount0, amount1) = _depositLBase(id, window, lBase, params.amount0Desired, params.amount1Desired, msg.sender);
         shares = amount0 + amount1;
         if (shares == 0) revert ZeroAmounts();
     }
@@ -176,7 +176,7 @@ contract BinBook is BaseCustomCurve {
         uint256 claim1 = poolManager.balanceOf(address(this), key.currency1.toId());
         (amount0, amount1) = SwapMath.getWithdrawAmounts(claim0, claim1, shares, supply);
 
-        _unwindUserL(id, msg.sender, shares, userShares);
+        _decreaseUserL(id, msg.sender, shares, userShares);
     }
 
     function _getUnspecifiedAmount(PoolKey calldata key, SwapParams calldata params)
@@ -246,7 +246,7 @@ contract BinBook is BaseCustomCurve {
 
         books[id] = BinLayout.Book({
             binSize: _binSize,
-            ramp: DEFAULT_RAMP,
+            baseRamp: DEFAULT_RAMP,
             numBinsPerSide: DEFAULT_BINS_PER_SIDE,
             currentBin: 0,
             minBin: 0,
@@ -272,7 +272,7 @@ contract BinBook is BaseCustomCurve {
         for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
             BinLayout.Position storage p = positions[id][msg.sender][idx];
             if (p.liquidity == 0 && p.tokensOwed0 == 0 && p.tokensOwed1 == 0) continue;
-            BinLayout.realizeFees(p, feeGrowth0X128[id], feeGrowth1X128[id], idx);
+            BinLayout.settleFees(p, feeGrowth0X128[id], feeGrowth1X128[id], idx);
             amount0 += p.tokensOwed0;
             amount1 += p.tokensOwed1;
             p.tokensOwed0 = 0;
@@ -368,13 +368,13 @@ contract BinBook is BaseCustomCurve {
 
         if (zeroForOne) {
             for (uint256 i = active;;) {
-                SwapMath.CoreStep memory c = _coreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, true);
+                SwapMath.CoreStep memory c = _computeCoreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, true);
                 w.remaining -= c.amountIn + c.feeAmount;
                 w.amountOut += c.amountOut;
                 w.feeTotal += c.feeAmount;
                 w.sqrtEnd = c.sqrtNext;
                 w.endIndex = i;
-                _creditFee(id, b.minBin + int24(int256(i)), c.feeAmount, true);
+                _accrueFee(id, b.minBin + int24(int256(i)), c.feeAmount, true);
                 if (w.remaining == 0 || i == 0) break;
                 unchecked {
                     --i;
@@ -383,13 +383,13 @@ contract BinBook is BaseCustomCurve {
         } else {
             uint256 last = bins.length - 1;
             for (uint256 i = active; i <= last;) {
-                SwapMath.CoreStep memory c = _coreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, false);
+                SwapMath.CoreStep memory c = _computeCoreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, false);
                 w.remaining -= c.amountIn + c.feeAmount;
                 w.amountOut += c.amountOut;
                 w.feeTotal += c.feeAmount;
                 w.sqrtEnd = c.sqrtNext;
                 w.endIndex = i;
-                _creditFee(id, b.minBin + int24(int256(i)), c.feeAmount, false);
+                _accrueFee(id, b.minBin + int24(int256(i)), c.feeAmount, false);
                 if (w.remaining == 0 || i == last) break;
                 unchecked {
                     ++i;
@@ -404,11 +404,13 @@ contract BinBook is BaseCustomCurve {
     }
 
     /// @dev Box computeSwapStep's tuple into one memory slot (stack-too-deep hygiene).
-    function _coreStep(SwapMath.Bin memory bin, uint160 sqrtP, uint256 remaining, uint24 feePips, bool zeroForOne)
-        private
-        pure
-        returns (SwapMath.CoreStep memory c)
-    {
+    function _computeCoreStep(
+        SwapMath.Bin memory bin,
+        uint160 sqrtP,
+        uint256 remaining,
+        uint24 feePips,
+        bool zeroForOne
+    ) private pure returns (SwapMath.CoreStep memory c) {
         (c.sqrtNext, c.amountIn, c.amountOut, c.feeAmount) =
             SwapMath.computeSwapStep(bin, sqrtP, -int256(remaining), feePips, zeroForOne);
     }
@@ -420,7 +422,7 @@ contract BinBook is BaseCustomCurve {
     }
 
     /// @dev Reduce the caller's bin L proportional to shares burned / their total shares.
-    function _unwindUserL(PoolId id, address user, uint256 sharesBurned, uint256 userShares) internal {
+    function _decreaseUserL(PoolId id, address user, uint256 sharesBurned, uint256 userShares) internal {
         BinLayout.UserRange memory r = userRanges[id][user];
         if (!r.set || userShares == 0) return;
 
@@ -428,7 +430,7 @@ contract BinBook is BaseCustomCurve {
             BinLayout.Position storage p = positions[id][user][idx];
             uint256 L = p.liquidity;
             if (L == 0) continue;
-            BinLayout.realizeFees(p, feeGrowth0X128[id], feeGrowth1X128[id], idx);
+            BinLayout.settleFees(p, feeGrowth0X128[id], feeGrowth1X128[id], idx);
             uint256 burnL = L * sharesBurned / userShares;
             if (burnL == 0) continue;
             if (burnL > L) burnL = L;
@@ -444,7 +446,7 @@ contract BinBook is BaseCustomCurve {
     function _depositLBase(
         PoolId id,
         BinLayout.Window memory window,
-        uint256 LBase,
+        uint256 lBase,
         uint256 amount0Desired,
         uint256 amount1Desired,
         address user
@@ -452,7 +454,7 @@ contract BinBook is BaseCustomCurve {
         _expandBook(id, window.minB, window.maxB, window.cur);
         (amount0, amount1) = books[id].depositLBase(
             window,
-            LBase,
+            lBase,
             amount0Desired,
             amount1Desired,
             user,
@@ -464,7 +466,7 @@ contract BinBook is BaseCustomCurve {
         );
     }
 
-    function _creditFee(PoolId id, int24 idx, uint256 fee, bool zeroForOne) internal {
+    function _accrueFee(PoolId id, int24 idx, uint256 fee, bool zeroForOne) internal {
         uint256 L = liquidity[id][idx];
         if (fee == 0 || L == 0) return;
         uint256 delta = FullMath.mulDiv(fee, FixedPoint128.Q128, L);
@@ -473,38 +475,8 @@ contract BinBook is BaseCustomCurve {
     }
 
     function _expandBook(PoolId id, int24 fillMin, int24 fillMax, int24 cur) internal {
-        BinLayout.Book storage b = books[id];
-        int24 minB = fillMin;
-        int24 maxB = fillMax;
-        if (cur < minB) minB = cur;
-        if (cur > maxB) maxB = cur;
-
-        if (!b.seeded) {
-            int24 n = int24(uint24(b.numBinsPerSide));
-            int24 defMin = cur - n;
-            int24 defMax = cur + n - 1;
-            if (defMin < minB) minB = defMin;
-            if (defMax > maxB) maxB = defMax;
-            b.currentBin = cur;
-            b.seeded = true;
-            b.minBin = minB;
-            b.maxBin = maxB;
-            emit BookExpanded(id, minB, maxB);
-        } else {
-            bool grew;
-            if (minB < b.minBin) {
-                b.minBin = minB;
-                grew = true;
-            }
-            if (maxB > b.maxBin) {
-                b.maxBin = maxB;
-                grew = true;
-            }
-            if (grew) emit BookExpanded(id, b.minBin, b.maxBin);
-        }
-
-        uint256 span = uint256(int256(b.maxBin - b.minBin + 1));
-        if (span > MAX_BOOK_BINS) revert BookTooWide();
+        (int24 minBin, int24 maxBin, bool expanded) = books[id].expandBook(fillMin, fillMax, cur);
+        if (expanded) emit BookExpanded(id, minBin, maxBin);
     }
 
     /// @dev Materializes the contiguous book as an ascending-price bin array for the swap walk.
@@ -514,7 +486,7 @@ contract BinBook is BaseCustomCurve {
         bins = new SwapMath.Bin[](n);
         for (uint256 i = 0; i < n; ++i) {
             int24 idx = b.minBin + int24(int256(i));
-            int24 tickLo = b.tickAtBin(idx);
+            int24 tickLo = b.tickLowerAtBin(idx);
             bins[i] = SwapMath.Bin({
                 L: liquidity[id][idx],
                 sqrtLo: TickMath.getSqrtPriceAtTick(tickLo),

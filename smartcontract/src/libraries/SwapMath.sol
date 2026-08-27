@@ -5,10 +5,9 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 
 /// @title SwapMath
-/// @notice Consolidated bin CPMM, linear-decay sizing, and LP mint/withdraw helpers for BinBook.
+/// @notice Bin swap-step math, linear-decay liquidity sizing, and LP withdraw helpers for BinBook.
 library SwapMath {
-    uint24 internal constant FEE_DENOMINATOR = 1_000_000;
-    /// @dev Uniswap-style alias of FEE_DENOMINATOR: max fee in pips (100%).
+    /// @dev Uniswap-style max fee in pips (100%).
     uint256 internal constant MAX_SWAP_FEE = 1_000_000;
     uint256 internal constant Q96 = 2 ** 96;
     uint256 internal constant Q192 = 2 ** 192;
@@ -21,21 +20,9 @@ library SwapMath {
         uint160 sqrtHi;
     }
 
-    struct Step {
-        uint256 amountInUsed;
-        uint256 amountOut;
-        uint160 sqrtEnd;
-        bool crossed;
-    }
-
     struct BinBounds {
         uint256 sqrtPriceLower;
         uint256 sqrtPriceUpper;
-    }
-
-    struct DepositAmounts {
-        uint256 amount0;
-        uint256 amount1;
     }
 
     /// @dev One computeSwapStep result, boxed so walkers hold a single stack slot.
@@ -54,99 +41,6 @@ library SwapMath {
         uint160 sqrtEnd;
         uint256 endIndex;
         uint256 remaining;
-    }
-
-    // ── Bin swap (from BinMath) ──────────────────────────────────────────
-
-    /// @dev Exact-in through one bin. `sqrtP` is clamped into [sqrtLo, sqrtHi].
-    function swapExactInSingle(Bin memory bin, uint160 sqrtP, uint256 amountIn, bool zeroForOne)
-        internal
-        pure
-        returns (Step memory step)
-    {
-        sqrtP = _clamp(sqrtP, bin.sqrtLo, bin.sqrtHi);
-        uint160 target = zeroForOne ? bin.sqrtLo : bin.sqrtHi;
-
-        if (amountIn == 0 || sqrtP == target) {
-            step.sqrtEnd = sqrtP;
-            return step;
-        }
-
-        if (bin.L == 0) {
-            step.sqrtEnd = target;
-            step.crossed = true;
-            return step;
-        }
-
-        uint160 sqrtNext = SqrtPriceMath.getNextSqrtPriceFromInput(sqrtP, bin.L, amountIn, zeroForOne);
-        bool crossed = zeroForOne ? sqrtNext <= target : sqrtNext >= target;
-
-        if (crossed) {
-            step.sqrtEnd = target;
-            step.crossed = true;
-            step.amountInUsed = _amountIn(sqrtP, target, bin.L, zeroForOne);
-            step.amountOut = _amountOut(sqrtP, target, bin.L, zeroForOne);
-        } else {
-            step.sqrtEnd = sqrtNext;
-            step.amountInUsed = amountIn;
-            step.amountOut = _amountOut(sqrtP, sqrtNext, bin.L, zeroForOne);
-        }
-    }
-
-    /// @dev Exact-in walk across `bins` (ascending price). `lo`/`hi` are inclusive index clamps.
-    function swapExactIn(
-        Bin[] memory bins,
-        uint160 sqrtP,
-        uint256 active,
-        uint256 amountIn,
-        bool zeroForOne,
-        uint256 lo,
-        uint256 hi
-    ) internal pure returns (uint256 amountOut, uint256 amountInUsed, uint160 sqrtEnd, uint256 endIndex) {
-        if (bins.length == 0 || amountIn == 0) {
-            return (0, 0, sqrtP, active);
-        }
-
-        uint256 remaining = amountIn;
-        sqrtEnd = sqrtP;
-        endIndex = active;
-
-        if (zeroForOne) {
-            uint256 start = active < hi ? active : hi;
-            if (start < lo) {
-                return (0, 0, sqrtP, active);
-            }
-            for (uint256 i = start; i >= lo;) {
-                Step memory step = swapExactInSingle(bins[i], sqrtEnd, remaining, true);
-                amountOut += step.amountOut;
-                amountInUsed += step.amountInUsed;
-                remaining -= step.amountInUsed;
-                sqrtEnd = step.sqrtEnd;
-                endIndex = i;
-                if (remaining == 0) break;
-                if (i == lo) break;
-                unchecked {
-                    --i;
-                }
-            }
-        } else {
-            uint256 start = active > lo ? active : lo;
-            for (uint256 i = start; i <= hi; ++i) {
-                Step memory step = swapExactInSingle(bins[i], sqrtEnd, remaining, false);
-                amountOut += step.amountOut;
-                amountInUsed += step.amountInUsed;
-                remaining -= step.amountInUsed;
-                sqrtEnd = step.sqrtEnd;
-                endIndex = i;
-                if (remaining == 0) break;
-            }
-        }
-    }
-
-    /// @dev Apply pool fee to amount-in. `feePips` is Uniswap-style (3000 = 0.30%).
-    function applyFee(uint256 amountIn, uint24 feePips) internal pure returns (uint256) {
-        if (feePips == 0) return amountIn;
-        return amountIn * (FEE_DENOMINATOR - feePips) / FEE_DENOMINATOR;
     }
 
     // ── Uniswap-style bin swap step ──────────────────────────────────────
@@ -341,128 +235,18 @@ library SwapMath {
     // ── Linear decay (from LinearDecay) ──────────────────────────────────
 
     /// @notice L_i = LBase * (ramp - distance) / ramp. L reaches 0 at distance >= ramp.
-    function lForDistance(uint256 LBase, uint256 ramp, uint256 distance) internal pure returns (uint256) {
-        if (distance == 0) return LBase;
+    function lForDistance(uint256 lBase, uint256 ramp, uint256 distance) internal pure returns (uint256) {
+        if (distance == 0) return lBase;
         if (distance >= ramp) return 0;
-        return LBase * (ramp - distance) / ramp;
+        return lBase * (ramp - distance) / ramp;
     }
 
     /// @dev Alias kept for call-site clarity in BinBook.
-    function computeLPerBin(uint256 LBase, uint256 ramp, uint256 distance) internal pure returns (uint256) {
-        return lForDistance(LBase, ramp, distance);
-    }
-
-    function computeLBase(uint256 token1Budget, uint256 binSpacing, uint256 ramp, uint256 numBins)
-        internal
-        pure
-        returns (uint256)
-    {
-        if (numBins == 0 || token1Budget == 0 || ramp == 0) return 0;
-        uint256 weightedSum = 0;
-        for (uint256 i = 0; i < numBins; i++) {
-            uint256 distance = numBins - i;
-            uint256 lFraction = computeLPerBin(1e18, ramp, distance);
-            weightedSum += lFraction * binSpacing / 1e18;
-        }
-        if (weightedSum == 0) return 0;
-        return token1Budget * Q96 / weightedSum;
-    }
-
-    function getDepositAmountsBelowPrice(
-        uint256 sqrtPriceCurrent,
-        uint256 binSpacing,
-        uint256 numBins,
-        uint256 ramp,
-        uint256 LBase
-    ) internal pure returns (uint256 totalToken0, uint256 totalToken1) {
-        if (numBins == 0 || LBase == 0) return (0, 0);
-        for (uint256 i = 0; i < numBins; i++) {
-            uint256 distance = numBins - i;
-            uint256 L = computeLPerBin(LBase, ramp, distance);
-            uint256 lo = sqrtPriceCurrent - (i + 1) * binSpacing;
-            uint256 hi = sqrtPriceCurrent - i * binSpacing;
-            (uint256 t0, uint256 t1) = getTokenAmountsForBin(L, sqrtPriceCurrent, BinBounds(lo, hi));
-            totalToken0 += t0;
-            totalToken1 += t1;
-        }
-    }
-
-    function getDepositAmountsAbovePrice(
-        uint256 sqrtPriceCurrent,
-        uint256 binSpacing,
-        uint256 numBins,
-        uint256 ramp,
-        uint256 LBase
-    ) internal pure returns (uint256 totalToken0, uint256 totalToken1) {
-        if (numBins == 0 || LBase == 0) return (0, 0);
-        for (uint256 i = 0; i < numBins; i++) {
-            uint256 distance = i + 1;
-            uint256 L = computeLPerBin(LBase, ramp, distance);
-            uint256 lo = sqrtPriceCurrent + i * binSpacing;
-            uint256 hi = sqrtPriceCurrent + (i + 1) * binSpacing;
-            (uint256 t0, uint256 t1) = getTokenAmountsForBin(L, sqrtPriceCurrent, BinBounds(lo, hi));
-            totalToken0 += t0;
-            totalToken1 += t1;
-        }
-    }
-
-    function distributeToken1WithBudget(uint256 token1Budget, uint256 binSpacing, uint256 numBins, uint256 ramp)
-        internal
-        pure
-        returns (uint256 LBase, DepositAmounts memory amounts)
-    {
-        if (numBins == 0 || token1Budget == 0) return (0, DepositAmounts(0, 0));
-        LBase = computeLBase(token1Budget, binSpacing, ramp, numBins);
-        uint256 totalToken0;
-        uint256 totalToken1;
-        for (uint256 i = 0; i < numBins; i++) {
-            uint256 distance = numBins - i;
-            uint256 L = computeLPerBin(LBase, ramp, distance);
-            uint256 lo = i * binSpacing;
-            uint256 hi = (i + 1) * binSpacing;
-            (uint256 t0, uint256 t1) = getTokenAmountsForBin(L, hi, BinBounds(lo, hi));
-            totalToken0 += t0;
-            totalToken1 += t1;
-        }
-        amounts = DepositAmounts(totalToken0, totalToken1);
+    function computeLPerBin(uint256 lBase, uint256 ramp, uint256 distance) internal pure returns (uint256) {
+        return lForDistance(lBase, ramp, distance);
     }
 
     // ── Liquidity / CPMM helpers (from LiquidityLibrary) ─────────────────
-
-    function sqrt(uint256 x) internal pure returns (uint256) {
-        if (x == 0) return 0;
-        uint256 z = x;
-        uint256 y;
-        if (x == type(uint256).max) {
-            y = (x >> 1) + 1;
-        } else {
-            y = (x + 1) >> 1;
-        }
-        while (y < z) {
-            z = y;
-            y = (x / y + y) >> 1;
-        }
-        return z;
-    }
-
-    function priceToSqrtPriceX96(uint256 price, uint8 decimals0, uint8 decimals1) internal pure returns (uint256) {
-        uint256 scaledPrice = price * (10 ** decimals0) / (10 ** decimals1);
-        uint8 adj = 18 + decimals0 - decimals1;
-        uint256 bigScaled = scaledPrice * 1e12;
-        if (adj % 2 == 0) {
-            return sqrt(bigScaled) * Q96 / (10 ** (adj / 2)) / 1e6;
-        } else {
-            return sqrt(bigScaled * 10) * Q96 / (10 ** (adj / 2 + 1)) / 1e6;
-        }
-    }
-
-    function sqrtPriceX96ToPrice(uint256 sqrtPriceX96, uint8, uint8) internal pure returns (uint256) {
-        uint256 a = sqrtPriceX96 >> 48;
-        uint256 b = sqrtPriceX96 & ((1 << 48) - 1);
-        uint256 price = a * a * 1e18 / Q96;
-        price += (2 * a * b * 1e18) >> 144;
-        return price;
-    }
 
     /// @notice Compute token amounts required to fund liquidity `L` within a single price bin.
     /// @dev Standard Uniswap v3 concentrated-liquidity formulas for a bin spanning [sqrtLo, sqrtHi]:
@@ -496,39 +280,6 @@ library SwapMath {
             token0 = L * (Q96 * Q96 / sqrtPriceCurrent - Q96 * Q96 / bounds.sqrtPriceUpper) / Q96;
             token1 = L * (sqrtPriceCurrent - bounds.sqrtPriceLower) / Q96;
         }
-    }
-
-    function getAmountsForBin(uint256 L, uint256 sqrtPriceCurrent, BinBounds memory bounds)
-        internal
-        pure
-        returns (uint256 token0, uint256 token1)
-    {
-        return getTokenAmountsForBin(L, sqrtPriceCurrent, bounds);
-    }
-
-    function getBinBounds(uint256 binIndex, uint256 spacing, uint256 sqrtPriceBase)
-        internal
-        pure
-        returns (BinBounds memory)
-    {
-        uint256 sqrtPriceLower = sqrtPriceBase + binIndex * spacing;
-        uint256 sqrtPriceUpper = sqrtPriceLower + spacing;
-        return BinBounds(sqrtPriceLower, sqrtPriceUpper);
-    }
-
-    function getMintAmounts(
-        uint256 totalLiquidity,
-        uint256 totalToken0,
-        uint256 totalToken1,
-        uint256 sharesToMint,
-        uint256 totalSupply
-    ) internal pure returns (uint256 amount0, uint256 amount1) {
-        if (sharesToMint == 0) return (0, 0);
-        if (totalSupply == 0 || totalLiquidity == 0) {
-            return (totalToken0, totalToken1);
-        }
-        amount0 = totalToken0 * sharesToMint / totalSupply;
-        amount1 = totalToken1 * sharesToMint / totalSupply;
     }
 
     function getWithdrawAmounts(uint256 totalToken0, uint256 totalToken1, uint256 sharesToBurn, uint256 totalSupply)

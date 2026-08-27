@@ -23,7 +23,7 @@ library BinLayout {
     ///      `Book storage` as its subject, exactly like `Pool.State`.
     struct Book {
         int24 binSize;
-        uint16 ramp;
+        uint16 baseRamp;
         uint16 numBinsPerSide;
         int24 currentBin;
         int24 minBin;
@@ -64,6 +64,9 @@ library BinLayout {
     /// @dev Cap on bins filled in a single add. Far ranges should use a larger `binSize`.
     uint16 public constant MAX_BINS_PER_ADD = 64;
 
+    /// @dev Cap on the total contiguous bin span a book may ever grow to.
+    uint16 public constant MAX_BOOK_BINS = 1024;
+
     /*//////////////////////////////////////////////////////////////
                                   ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -71,6 +74,7 @@ library BinLayout {
     error TicksNotAlignedToBins();
     error InvalidTickRange();
     error TooManyBins();
+    error BookTooWide();
 
     /*//////////////////////////////////////////////////////////////
                               BOOK RESOLUTION
@@ -84,7 +88,7 @@ library BinLayout {
     /// @return minB Lowest bin index in the contiguous book
     /// @return maxB Highest bin index in the contiguous book
     /// @return cur Active bin index containing the current price
-    function binRange(Book storage b) internal view returns (int24 minB, int24 maxB, int24 cur) {
+    function bookRange(Book storage b) internal view returns (int24 minB, int24 maxB, int24 cur) {
         // If already seeded, bins are cached — just return them (saves gas)
         if (b.seeded) {
             return (b.minBin, b.maxBin, b.currentBin);
@@ -113,7 +117,7 @@ library BinLayout {
     {
         if (tickLower >= tickUpper) revert InvalidTickRange();
 
-        (,, int24 cur) = binRange(book);
+        (,, int24 cur) = bookRange(book);
         window.cur = cur;
 
         if (tickLower % book.binSize != 0 || tickUpper % book.binSize != 0) revert TicksNotAlignedToBins();
@@ -128,7 +132,59 @@ library BinLayout {
 
         window.minB = userMin;
         window.maxB = userMax;
-        window.ramp = resolveRamp(userMin, userMax, cur, book.ramp);
+        window.ramp = resolveRamp(userMin, userMax, cur, book.baseRamp);
+    }
+
+    /// @notice Grows a book's contiguous bin range to cover `[fillMin, fillMax]` (and `cur`),
+    ///         seeding it on first use with `numBinsPerSide` bins spread around `cur`.
+    /// @dev Pure state-transition on `Book storage`; the caller owns event emission (mirrors
+    ///      how `BinBook` calls `resolveWindow`/`depositLBase` and stays event-owner).
+    /// @param b The pool's book state
+    /// @param fillMin Lowest bin index that must be covered
+    /// @param fillMax Highest bin index that must be covered
+    /// @param cur Active bin index containing the current price
+    /// @return minBin Book's minimum bin index after expansion
+    /// @return maxBin Book's maximum bin index after expansion
+    /// @return expanded True if the book's range changed (first seed, or an actual grow)
+    function expandBook(Book storage b, int24 fillMin, int24 fillMax, int24 cur)
+        internal
+        returns (int24 minBin, int24 maxBin, bool expanded)
+    {
+        int24 minB = fillMin;
+        int24 maxB = fillMax;
+        if (cur < minB) minB = cur;
+        if (cur > maxB) maxB = cur;
+
+        if (!b.seeded) {
+            int24 n = int24(uint24(b.numBinsPerSide));
+            int24 defMin = cur - n;
+            int24 defMax = cur + n - 1;
+            if (defMin < minB) minB = defMin;
+            if (defMax > maxB) maxB = defMax;
+            b.currentBin = cur;
+            b.seeded = true;
+            b.minBin = minB;
+            b.maxBin = maxB;
+            minBin = minB;
+            maxBin = maxB;
+            expanded = true;
+        } else {
+            minBin = b.minBin;
+            maxBin = b.maxBin;
+            if (minB < minBin) {
+                b.minBin = minB;
+                minBin = minB;
+                expanded = true;
+            }
+            if (maxB > maxBin) {
+                b.maxBin = maxB;
+                maxBin = maxB;
+                expanded = true;
+            }
+        }
+
+        uint256 span = uint256(int256(maxBin - minBin + 1));
+        if (span > MAX_BOOK_BINS) revert BookTooWide();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -137,7 +193,7 @@ library BinLayout {
 
     /// @notice Lower tick boundary of bin `idx`.
     /// @dev Reverts if the bin falls outside the v4 tick domain.
-    function tickAtBin(Book storage b, int24 idx) internal view returns (int24) {
+    function tickLowerAtBin(Book storage b, int24 idx) internal view returns (int24) {
         int256 tick = int256(idx) * int256(b.binSize);
         if (tick < TickMath.MIN_TICK || tick > TickMath.MAX_TICK) revert InvalidTickRange();
         return int24(tick);
@@ -146,12 +202,12 @@ library BinLayout {
     /// @notice Token0/token1 required to fund liquidity `L` in bin `idx` at the book's price.
     /// @dev Reads the price from the book itself (`sqrtPriceX96`) — the same field swaps mutate,
     ///      so every solve/deposit prices against live state without extra plumbing.
-    function amountsFor(Book storage book, int24 binIndex, uint256 liquidity)
+    function tokenAmountsForBin(Book storage book, int24 binIndex, uint256 liquidity)
         internal
         view
         returns (uint256 token0, uint256 token1)
     {
-        int24 tickLo = tickAtBin(book, binIndex);
+        int24 tickLo = tickLowerAtBin(book, binIndex);
         uint160 sqrtLo = TickMath.getSqrtPriceAtTick(tickLo);
         uint160 sqrtHi = TickMath.getSqrtPriceAtTick(tickLo + book.binSize);
         return SwapMath.getTokenAmountsForBin(
@@ -182,7 +238,7 @@ library BinLayout {
         for (int24 idx = window.minB; idx <= window.maxB; ++idx) {
             uint256 liquidity = SwapMath.computeLPerBin(probe, window.ramp, binDistance(idx, window.cur));
             if (liquidity == 0) continue;
-            (uint256 t0, uint256 t1) = amountsFor(book, idx, liquidity);
+            (uint256 t0, uint256 t1) = tokenAmountsForBin(book, idx, liquidity);
             if (amount0Desired == 0 && t0 > 0) continue;
             if (amount1Desired == 0 && t1 > 0) continue;
             need0 += t0;
@@ -233,28 +289,32 @@ library BinLayout {
         for (int24 idx = window.minB; idx <= window.maxB; ++idx) {
             uint256 addL = SwapMath.computeLPerBin(lBase, window.ramp, binDistance(idx, window.cur));
             if (addL == 0) continue;
-            (uint256 t0, uint256 t1) = amountsFor(book, idx, addL);
+            (uint256 t0, uint256 t1) = tokenAmountsForBin(book, idx, addL);
             if (amount0Desired == 0 && t0 > 0) continue;
             if (amount1Desired == 0 && t1 > 0) continue;
             amount0 += t0;
             amount1 += t1;
-            creditUserL(userPositions[account][idx], ranges[account], totalLiquidity, feeGrowth0, feeGrowth1, idx, addL);
+
+            Position storage p = userPositions[account][idx];
+            // Two independent steps, called out explicitly rather than bundled behind one
+            // wrapper: settle fees against the *pre-increase* L, then bump L. Order matters —
+            // settleFees must run first or the fee growth since the last checkpoint would be
+            // computed against the wrong (post-increase) liquidity.
+            settleFees(p, feeGrowth0, feeGrowth1, idx);
+            increaseUserL(p, ranges[account], totalLiquidity, idx, addL);
         }
     }
 
-    /// @dev Credits `addL` to a depositor's position in one bin: settles accrued fees first so
-    ///      the growth checkpoint advances atomically with the L bump, then widens the caller's
-    ///      contiguous range to cover the bin.
-    function creditUserL(
+    /// @dev Increases a depositor's L in one bin and widens their contiguous range to cover it.
+    ///      Pure liquidity bookkeeping — does not touch fees. Callers with an existing position
+    ///      must call `settleFees` first so accrued fees settle against the pre-increase L.
+    function increaseUserL(
         Position storage p,
         UserRange storage r,
         mapping(int24 binIndex => uint128) storage totalLiquidity,
-        mapping(int24 binIndex => uint256) storage feeGrowth0,
-        mapping(int24 binIndex => uint256) storage feeGrowth1,
         int24 binIndex,
         uint256 addL
     ) internal {
-        realizeFees(p, feeGrowth0, feeGrowth1, binIndex);
         uint128 add128 = addL.toUint128();
         p.liquidity += add128;
         totalLiquidity[binIndex] += add128;
@@ -271,7 +331,12 @@ library BinLayout {
 
     /// @dev Settles fees accrued to `p` since its last checkpoint into `tokensOwed`, then moves
     ///      the checkpoint up to the bin's current growth.
-    function realizeFees(
+    /// @dev Mirrors Uniswap v3 `Position.update`: the tokensOwed SSTORE is skipped when nothing
+    ///      actually accrued (e.g. a same-block re-touch, or a bin with no swap volume since the
+    ///      last checkpoint) — writing back an unchanged value still costs a warm SSTORE. The
+    ///      checkpoint itself always advances, same as upstream, so a fresh position's initial
+    ///      checkpoint still gets set correctly.
+    function settleFees(
         Position storage p,
         mapping(int24 binIndex => uint256) storage feeGrowth0,
         mapping(int24 binIndex => uint256) storage feeGrowth1,
@@ -279,8 +344,10 @@ library BinLayout {
     ) internal {
         uint256 L = p.liquidity;
         if (L != 0) {
-            p.tokensOwed0 += FullMath.mulDiv(feeGrowth0[binIndex] - p.feeGrowth0LastX128, L, FixedPoint128.Q128);
-            p.tokensOwed1 += FullMath.mulDiv(feeGrowth1[binIndex] - p.feeGrowth1LastX128, L, FixedPoint128.Q128);
+            uint256 owed0 = FullMath.mulDiv(feeGrowth0[binIndex] - p.feeGrowth0LastX128, L, FixedPoint128.Q128);
+            uint256 owed1 = FullMath.mulDiv(feeGrowth1[binIndex] - p.feeGrowth1LastX128, L, FixedPoint128.Q128);
+            if (owed0 > 0) p.tokensOwed0 += owed0;
+            if (owed1 > 0) p.tokensOwed1 += owed1;
         }
         p.feeGrowth0LastX128 = feeGrowth0[binIndex];
         p.feeGrowth1LastX128 = feeGrowth1[binIndex];
