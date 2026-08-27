@@ -2,21 +2,19 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { formatUnits, parseUnits, type Address } from "viem";
-import {
-  useAccount,
-  useReadContracts,
-  useWaitForTransactionReceipt,
-  useWriteContract,
-} from "wagmi";
+import { useAccount, useReadContracts, useWriteContract } from "wagmi";
 import { binBookAbi } from "@/lib/abi/binBook";
 import { StatsBar } from "@/components/StatsBar";
 import { TokenSelect } from "@/components/TokenSelect";
+import { TxModal, type TxStatus, type TxStep } from "@/components/TxModal";
+import { useAppPublicClient } from "@/hooks/useAppPublicClient";
 import { useBinLiquidity } from "@/hooks/useBinLiquidity";
 import { useBook } from "@/hooks/useBook";
 import { useDeployment } from "@/hooks/useDeployment";
 import { usePool } from "@/hooks/usePool";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
 import {
+  binAtTick,
   buildRampPreview,
   composeRangeAmounts,
   DEFAULT_BINS_PER_SIDE,
@@ -43,29 +41,6 @@ const erc20Abi = [
     stateMutability: "view",
     inputs: [{ name: "", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
-  },
-] as const;
-
-const poolManagerAbi = [
-  {
-    type: "function",
-    name: "initialize",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "key",
-        type: "tuple",
-        components: [
-          { name: "currency0", type: "address" },
-          { name: "currency1", type: "address" },
-          { name: "fee", type: "uint24" },
-          { name: "tickSpacing", type: "int24" },
-          { name: "hooks", type: "address" },
-        ],
-      },
-      { name: "sqrtPriceX96", type: "uint160" },
-    ],
-    outputs: [{ name: "tick", type: "int24" }],
   },
 ] as const;
 
@@ -262,7 +237,16 @@ export function LiquidityConsole() {
   // and so a range entirely above/below spot locks out the token it doesn't need.
   const baseRamp = showDemo ? DEFAULT_RAMP : (book?.ramp ?? DEFAULT_RAMP);
   const numBinsPerSide = showDemo ? DEFAULT_BINS_PER_SIDE : (book?.numBinsPerSide ?? DEFAULT_BINS_PER_SIDE);
-  const curBin = axisBook?.currentBin ?? 0;
+  // The demo ramp's own axisBook always centers on bin 0 (a fixed, price-independent visual), but
+  // the actual deposit composition must be centered on whichever bin the entered starting price
+  // falls into — otherwise a price far from 1 makes the checked range miss the real price entirely,
+  // and every bin looks single-sided (composeRangeAmounts sees `sqrtCur` outside every bin it's
+  // given), locking one of the two deposit fields even though the pool would genuinely take both.
+  const previewCurBin = useMemo(
+    () => binAtTick(Math.round(Math.log(previewPrice) / Math.log(1.0001)), previewBinSize),
+    [previewPrice, previewBinSize]
+  );
+  const curBin = needsCreate ? previewCurBin : (axisBook?.currentBin ?? 0);
   const effLower = lowerBin ?? curBin - numBinsPerSide;
   const effUpper = upperBin ?? curBin + numBinsPerSide - 1;
   const effBinSize = axisBook?.binSize ?? previewBinSize;
@@ -352,8 +336,23 @@ export function LiquidityConsole() {
     }
   }
 
-  const { writeContractAsync, data: hash, isPending } = useWriteContract();
-  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash });
+  const { writeContractAsync } = useWriteContract();
+  const publicClient = useAppPublicClient(deployment);
+  const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
+
+  const [txModalOpen, setTxModalOpen] = useState(false);
+  const [txModalStatus, setTxModalStatus] = useState<TxStatus>("pending");
+  const [txError, setTxError] = useState<string | null>(null);
+  const [txSteps, setTxSteps] = useState<TxStep[]>([]);
+  // Locks the whole multi-step flow (create pool → approvals → add liquidity) from the moment the
+  // first transaction is sent until the last one is confirmed — `isPending`/`confirming` alone
+  // briefly go false between steps (once one tx is sent but before the next is requested), which
+  // would let a second click race a new submission in on top of one still in flight.
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const txSummary = (amount0 !== "0" || amount1 !== "0") && base.symbol && quote.symbol
+    ? `${amount0 !== "0" ? `${amount0} ${base.symbol}` : ""}${amount0 !== "0" && amount1 !== "0" ? " + " : ""}${amount1 !== "0" ? `${amount1} ${quote.symbol}` : ""}`
+    : undefined;
 
   const dec0 = base.decimals;
   const dec1 = quote.decimals;
@@ -362,59 +361,106 @@ export function LiquidityConsole() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!deployment || !address || !key || dec0 === undefined || dec1 === undefined) return;
+    if (isSubmitting) return;
+    if (!deployment || !address || !key || dec0 === undefined || dec1 === undefined || !publicClient) return;
+    setIsSubmitting(true);
     setStatus(null);
+    setTxError(null);
+    setTxModalOpen(true);
+    setTxModalStatus("pending");
+    setTxHash(null);
+
+    const a0 = parseUnits(amount0 || "0", dec0);
+    const a1 = parseUnits(amount1 || "0", dec1);
+    const hasApproval0 = a0 > 0n;
+    const hasApproval1 = a1 > 0n;
+
+    const allSteps: TxStep[] = [];
+    if (needsCreate) {
+      allSteps.push({ label: "Create pool", done: false });
+    }
+    if (hasApproval0) allSteps.push({ label: `Approve ${base.symbol}`, done: false });
+    if (hasApproval1) allSteps.push({ label: `Approve ${quote.symbol}`, done: false });
+    allSteps.push({ label: "Add liquidity", done: false });
+    setTxSteps(allSteps);
+
+    let stepIdx = 0;
+    const markDone = () => {
+      setTxSteps((prev) => prev.map((s, i) => (i === stepIdx ? { ...s, done: true } : s)));
+      stepIdx++;
+    };
+
+    // Waits for each step to actually land on-chain before moving to the next — addLiquidity
+    // depends on createPool having landed, and its transferFrom depends on the approvals having
+    // landed, so firing steps back-to-back the moment each is merely *sent* (not yet mined) risks
+    // the next step reverting against stale pre-tx state.
+    const sendAndConfirm = async (params: Parameters<typeof writeContractAsync>[0]) => {
+      // Dry-runs the call against current chain state first — surfaces the real revert reason
+      // immediately, before the wallet even opens or any gas is spent, instead of only finding
+      // out after paying for a failed transaction.
+      await publicClient.simulateContract({ ...params, account: address } as Parameters<
+        typeof publicClient.simulateContract
+      >[0]);
+      const hash = await writeContractAsync(params);
+      setTxHash(hash);
+      // A bounded timeout so a flaky/rate-limited RPC surfaces as an error instead of spinning
+      // forever — the transaction itself may still be fine on-chain even if this call times out.
+      await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
+      markDone();
+    };
+
     try {
       if (needsCreate) {
         const price = Number(startingPrice);
         if (!Number.isFinite(price) || price <= 0) {
+          setTxModalStatus("error");
+          setTxError("Enter a valid starting price");
           setStatus("Enter a valid starting price");
           return;
         }
         const bs = Number(binSize);
         if (!Number.isFinite(bs) || bs <= 0) {
+          setTxModalStatus("error");
+          setTxError("Enter a valid bin size");
           setStatus("Enter a valid bin size");
           return;
         }
-        await writeContractAsync({
-          address: deployment.poolManager,
-          abi: poolManagerAbi,
-          functionName: "initialize",
-          args: [key, priceToSqrtPriceX96(price)],
-        });
-        await writeContractAsync({
+        await sendAndConfirm({
           address: deployment.binBook,
           abi: binBookAbi,
-          functionName: "setBinSize",
-          args: [key, bs],
+          functionName: "createPool",
+          args: [key, priceToSqrtPriceX96(price), bs],
+          gas: 500_000n,
         });
       }
 
-      const a0 = parseUnits(amount0 || "0", dec0);
-      const a1 = parseUnits(amount1 || "0", dec1);
-      if (a0 > 0n) {
-        await writeContractAsync({
+      if (hasApproval0) {
+        await sendAndConfirm({
           address: key.currency0,
           abi: erc20Abi,
           functionName: "approve",
           args: [deployment.binBook, a0],
+          gas: 100_000n,
         });
       }
-      if (a1 > 0n) {
-        await writeContractAsync({
+      if (hasApproval1) {
+        await sendAndConfirm({
           address: key.currency1,
           abi: erc20Abi,
           functionName: "approve",
           args: [deployment.binBook, a1],
+          gas: 100_000n,
         });
       }
 
-      const auto = needsCreate || lowerBin === null || upperBin === null;
-      const activeBinSize = book?.binSize || Number(binSize);
-      const tickLower = auto ? 0 : tickAtBin(lowerBin, activeBinSize);
-      const tickUpper = auto ? 0 : tickAtBin(upperBin + 1, activeBinSize);
+      // effLower/effUpper already fall back to the default ramp window (curBin ± numBinsPerSide)
+      // whenever no explicit range is picked — reuse that instead of a 0/0 sentinel, which
+      // `resolveWindow` rejects outright (`tickLower >= tickUpper`) since the contract has no
+      // "auto" concept of its own; it only ever validates a real, non-degenerate tick range.
+      const tickLower = tickAtBin(effLower, effBinSize);
+      const tickUpper = tickAtBin(effUpper + 1, effBinSize);
 
-      await writeContractAsync({
+      const addLiquidityParams = {
         address: deployment.binBook,
         abi: binBookAbi,
         functionName: "addLiquidity",
@@ -431,11 +477,27 @@ export function LiquidityConsole() {
             userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
           },
         ],
-      });
+        gas: 3_000_000n,
+      } as const;
+
+      await publicClient.simulateContract({ ...addLiquidityParams, account: address } as Parameters<
+        typeof publicClient.simulateContract
+      >[0]);
+      const addLiqHash = await writeContractAsync(addLiquidityParams);
+      setTxSteps((prev) => prev.map((s) => ({ ...s, done: true })));
+      setTxHash(addLiqHash);
+      setTxModalStatus("confirming");
+      await publicClient.waitForTransactionReceipt({ hash: addLiqHash, timeout: 120_000 });
+      setTxModalStatus("success");
       setStatus(needsCreate ? "Pool created and liquidity added" : "Liquidity added");
       balQ.refetch();
     } catch (err) {
-      setStatus(err instanceof Error ? err.message.slice(0, 200) : "Failed");
+      setTxModalStatus("error");
+      const msg = err instanceof Error ? err.message.slice(0, 200) : "Failed";
+      setTxError(msg);
+      setStatus(msg);
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -445,13 +507,13 @@ export function LiquidityConsole() {
       ? "Switch network"
       : pairInvalid
         ? "Pick two tokens"
-        : isPending || confirming
+        : isSubmitting
           ? "Confirm in wallet…"
           : needsCreate
             ? "Create pool & add liquidity"
             : "Add liquidity";
 
-  const canSubmit = isConnected && !needsNetworkSwitch && !pairInvalid && !isPending && !confirming;
+  const canSubmit = isConnected && !needsNetworkSwitch && !pairInvalid && !isSubmitting;
 
   const currentPricePct = axisBook
     ? ((axisBook.currentBin - axisBook.minBin + 0.5) / (axisBook.maxBin - axisBook.minBin + 1)) *
@@ -523,9 +585,10 @@ export function LiquidityConsole() {
                   : "Click a bin to start a range, click another to finish it — or pick a shape below."}
               </p>
             </div>
-            {bookPrice !== null && !showDemo && (
+            {!preview && (
               <span className="ramp-price-chip mono">
-                1 {base.symbol ?? "token0"} = {formatPriceHuman(bookPrice)} {quote.symbol ?? "token1"}
+                1 {base.symbol ?? "token0"} ={" "}
+                {formatPriceHuman(needsCreate ? previewPrice : (bookPrice ?? 1))} {quote.symbol ?? "token1"}
               </span>
             )}
           </div>
@@ -721,6 +784,18 @@ export function LiquidityConsole() {
           </button>
           {status && <p className="status">{status}</p>}
           {preview && <p className="dock-note">Preview data — connect a wallet to go live.</p>}
+
+          <TxModal
+            open={txModalOpen}
+            onClose={() => setTxModalOpen(false)}
+            status={txModalStatus}
+            hash={txHash}
+            chainId={deployment?.chainId}
+            error={txError}
+            action={needsCreate ? "Create Pool" : "Add Liquidity"}
+            summary={txSummary}
+            steps={txSteps}
+          />
         </form>
       </div>
     </div>

@@ -443,15 +443,15 @@ contract BinBook is BaseCustomCurve {
     ///      funded-bin walk to `BinLayout.depositLBase`.
     function _depositLBase(
         PoolId id,
-        BinLayout.Window memory w,
+        BinLayout.Window memory window,
         uint256 LBase,
         uint256 amount0Desired,
         uint256 amount1Desired,
         address user
     ) internal returns (uint256 amount0, uint256 amount1) {
-        _expandBook(id, w.minB, w.maxB, w.cur);
+        _expandBook(id, window.minB, window.maxB, window.cur);
         (amount0, amount1) = books[id].depositLBase(
-            w,
+            window,
             LBase,
             amount0Desired,
             amount1Desired,

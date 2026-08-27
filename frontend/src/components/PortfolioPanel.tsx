@@ -1,79 +1,94 @@
 "use client";
 
-import { useState } from "react";
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import Link from "next/link";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { formatUnits, type Address } from "viem";
+import { useAccount, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
 import { binBookAbi } from "@/lib/abi/binBook";
+import { TokenAvatar, TokenSelect } from "@/components/TokenSelect";
+import { TxModal, type TxStatus } from "@/components/TxModal";
 import { useDeployment } from "@/hooks/useDeployment";
+import { usePairPosition } from "@/hooks/usePairPosition";
 import { usePool } from "@/hooks/usePool";
+import { usePositions, type Position } from "@/hooks/usePositions";
+import { useTokenMeta } from "@/hooks/useTokenMeta";
+import { formatBigIntCompact, formatPriceHuman, sqrtPriceX96ToPrice } from "@/lib/priceMath";
+import type { FaucetToken } from "@/lib/tokens";
 
-const WITHDRAW_PCTS = [25, 50, 100] as const;
+const WITHDRAW_PRESETS = [25, 50, 75, 100] as const;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
-export function PortfolioPanel() {
-  const { address, isConnected } = useAccount();
+function fmtAmount(raw: bigint, decimals?: number): string {
+  if (decimals === undefined) return "—";
+  const v = Number(formatUnits(raw, decimals));
+  if (v === 0) return "0";
+  return v < 0.0001 ? v.toExponential(2) : v.toLocaleString(undefined, { maximumFractionDigits: 6 });
+}
+
+function PositionCard({ position, onChanged }: { position: Position; onChanged: () => void }) {
   const { deployment } = useDeployment();
-  const { key, poolId } = usePool();
-  const [status, setStatus] = useState<string | null>(null);
-  const [withdrawPct, setWithdrawPct] = useState<number>(50);
+  const base = useTokenMeta(position.key.currency0);
+  const quote = useTokenMeta(position.key.currency1);
 
-  const sharesQ = useReadContract({
-    address: deployment?.binBook,
-    abi: binBookAbi,
-    functionName: "getShares",
-    args: poolId && address ? [poolId, address] : undefined,
-    query: { enabled: !!poolId && !!address },
-  });
+  const [pct, setPct] = useState(100);
+  const [expanded, setExpanded] = useState(false);
 
-  const supplyQ = useReadContract({
-    address: deployment?.binBook,
-    abi: binBookAbi,
-    functionName: "getTotalShares",
-    args: poolId ? [poolId] : undefined,
-    query: { enabled: !!poolId },
-  });
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalStatus, setModalStatus] = useState<TxStatus>("pending");
+  const [modalAction, setModalAction] = useState<string>("");
+  const [modalSummary, setModalSummary] = useState<string | undefined>(undefined);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
 
-  const pendingQ = useReadContract({
-    address: deployment?.binBook,
-    abi: binBookAbi,
-    functionName: "pendingFees",
-    args: poolId && address ? [poolId, address] : undefined,
-    query: { enabled: !!poolId && !!address },
-  });
+  const { writeContractAsync, isPending } = useWriteContract();
+  const { isLoading: confirming } = useWaitForTransactionReceipt({ hash: txHash ?? undefined });
 
-  const { writeContractAsync, data: hash, isPending } = useWriteContract();
-  const { isLoading: confirming } = useWaitForTransactionReceipt({ hash });
+  const price = position.sqrtPriceX96 > 0n ? sqrtPriceX96ToPrice(position.sqrtPriceX96) : null;
+  const hasFees = position.fee0 > 0n || position.fee1 > 0n;
+  const busy = isPending || confirming;
 
-  async function collect() {
-    if (!deployment || !key) return;
-    setStatus(null);
+  async function run(label: string, summary: string | undefined, fn: () => Promise<`0x${string}`>) {
+    setModalAction(label);
+    setModalSummary(summary);
+    setModalError(null);
+    setModalStatus("pending");
+    setModalOpen(true);
+    setTxHash(null);
     try {
-      await writeContractAsync({
-        address: deployment.binBook,
-        abi: binBookAbi,
-        functionName: "collectFees",
-        args: [key],
-      });
-      setStatus("Fees collected");
+      const hash = await fn();
+      setTxHash(hash);
+      setModalStatus("confirming");
+      onChanged();
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Collect failed");
+      setModalStatus("error");
+      setModalError(err instanceof Error ? err.message.slice(0, 200) : "Transaction failed");
     }
   }
 
-  async function withdraw() {
-    if (!deployment || !key) return;
-    const shares = sharesQ.data ?? 0n;
-    const amount = (shares * BigInt(withdrawPct)) / 100n;
-    if (amount === 0n) {
-      setStatus("No shares to withdraw");
-      return;
-    }
-    setStatus(null);
-    try {
-      await writeContractAsync({
+  async function claim() {
+    if (!deployment) return;
+    await run("Claim Fees", undefined, () =>
+      writeContractAsync({
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "collectFees",
+        args: [position.key],
+        gas: 1_500_000n,
+      })
+    );
+  }
+
+  async function remove() {
+    if (!deployment) return;
+    const amount = (position.shares * BigInt(pct)) / 100n;
+    if (amount === 0n) return;
+    await run("Remove Liquidity", `${pct}% of your position`, () =>
+      writeContractAsync({
         address: deployment.binBook,
         abi: binBookAbi,
         functionName: "removeLiquidity",
         args: [
-          key,
+          position.key,
           {
             liquidity: amount,
             amount0Min: 0n,
@@ -84,90 +99,283 @@ export function PortfolioPanel() {
             userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
           },
         ],
-      });
-      setStatus(`Withdrew ${withdrawPct}% of your position`);
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Withdraw failed");
+        gas: 2_000_000n,
+      })
+    );
+  }
+
+  const accentA = base.color ?? "#3ecf8e";
+  const accentB = quote.color ?? "#6ea8ff";
+
+  return (
+    <div
+      className="position-card"
+      style={{ "--accent-a": accentA, "--accent-b": accentB } as CSSProperties}
+    >
+      <div className="position-card-glow" />
+
+      <div className="position-card-head">
+        <div className="position-pair">
+          <span className="avatar-stack">
+            <TokenAvatar color={accentA} symbol={base.symbol ?? "?"} />
+            <TokenAvatar color={accentB} symbol={quote.symbol ?? "?"} />
+          </span>
+          <div className="position-pair-id">
+            <strong>
+              {base.symbol ?? "…"} / {quote.symbol ?? "…"}
+            </strong>
+            <span className="muted tiny">
+              Bin size {position.binSize}
+              {price !== null ? ` · 1 ${base.symbol ?? "tok0"} = ${formatPriceHuman(price)} ${quote.symbol ?? "tok1"}` : ""}
+            </span>
+          </div>
+        </div>
+        {hasFees && <span className="position-fees-dot" title="Fees available to claim" />}
+      </div>
+
+      <div className="position-metrics">
+        <div className="meta-chip">
+          <dt>Your shares</dt>
+          <dd className="tabular" title={position.shares.toLocaleString()}>
+            {formatBigIntCompact(position.shares)}
+          </dd>
+        </div>
+        <div className="meta-chip">
+          <dt>Pool share</dt>
+          <dd className="tabular">{position.sharePct.toFixed(2)}%</dd>
+        </div>
+        <div className="meta-chip">
+          <dt>Pending {base.symbol ?? "tok0"}</dt>
+          <dd className="tabular up">{fmtAmount(position.fee0, base.decimals)}</dd>
+        </div>
+        <div className="meta-chip">
+          <dt>Pending {quote.symbol ?? "tok1"}</dt>
+          <dd className="tabular up">{fmtAmount(position.fee1, quote.decimals)}</dd>
+        </div>
+      </div>
+
+      <div className="position-actions">
+        <button type="button" className="cta secondary" onClick={claim} disabled={busy || !hasFees}>
+          {busy && modalAction === "Claim Fees" ? "Confirm…" : "Claim fees"}
+        </button>
+        <button type="button" className="cta secondary" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? "Cancel" : "Remove liquidity"}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="withdraw-panel">
+          <div className="withdraw-presets">
+            {WITHDRAW_PRESETS.map((p) => (
+              <button
+                key={p}
+                type="button"
+                className={pct === p ? "shape-pill active" : "shape-pill"}
+                onClick={() => setPct(p)}
+              >
+                {p}%
+              </button>
+            ))}
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={100}
+            value={pct}
+            onChange={(e) => setPct(Number(e.target.value))}
+            className="withdraw-slider"
+            aria-label="Percent to remove"
+          />
+          <button type="button" className="cta" onClick={remove} disabled={busy}>
+            {busy && modalAction === "Remove Liquidity" ? "Confirm…" : `Remove ${pct}%`}
+          </button>
+        </div>
+      )}
+
+      <TxModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        status={modalStatus}
+        hash={txHash}
+        chainId={deployment?.chainId}
+        error={modalError}
+        action={modalAction}
+        summary={modalSummary}
+      />
+    </div>
+  );
+}
+
+function PositionSkeleton() {
+  return (
+    <div className="position-card skeleton">
+      <div className="position-card-head">
+        <div className="position-pair">
+          <span className="avatar-stack">
+            <span className="token-avatar token-avatar-sm skeleton-block" />
+            <span className="token-avatar token-avatar-sm skeleton-block" />
+          </span>
+          <div className="position-pair-id">
+            <span className="skeleton-line" style={{ width: "6rem" }} />
+            <span className="skeleton-line" style={{ width: "8rem" }} />
+          </div>
+        </div>
+      </div>
+      <div className="position-metrics">
+        {[0, 1, 2, 3].map((i) => (
+          <div className="meta-chip" key={i}>
+            <span className="skeleton-line" style={{ width: "4rem" }} />
+            <span className="skeleton-line" style={{ width: "3rem", marginTop: "0.4rem" }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function PortfolioPanel() {
+  const { isConnected } = useAccount();
+  const { deployment } = useDeployment();
+  const { positions, isLoading, refetch } = usePositions();
+
+  // Pair picker — defaults to the deployment's configured pair, but any two tokens can be
+  // targeted directly instead of waiting on the full-history pool scan to surface them.
+  const [baseAddr, setBaseAddr] = useState<Address | undefined>(undefined);
+  const [quoteAddr, setQuoteAddr] = useState<Address | undefined>(undefined);
+  useEffect(() => {
+    if (deployment && !baseAddr && !quoteAddr) {
+      setBaseAddr(deployment.token0);
+      setQuoteAddr(deployment.token1);
+    }
+  }, [deployment, baseAddr, quoteAddr]);
+
+  const pair = baseAddr && quoteAddr ? { token0: baseAddr, token1: quoteAddr } : undefined;
+  const pairInvalid = !!baseAddr && !!quoteAddr && baseAddr.toLowerCase() === quoteAddr.toLowerCase();
+
+  function selectAt(slot: "base" | "quote", a: Address) {
+    if (slot === "base") {
+      if (quoteAddr && a.toLowerCase() === quoteAddr.toLowerCase()) setQuoteAddr(baseAddr);
+      setBaseAddr(a);
+    } else {
+      if (baseAddr && a.toLowerCase() === baseAddr.toLowerCase()) setBaseAddr(quoteAddr);
+      setQuoteAddr(a);
     }
   }
 
-  const fee0 = pendingQ.data?.[0];
-  const fee1 = pendingQ.data?.[1];
-  const shareVal = sharesQ.data;
-  const supplyVal = supplyQ.data;
-  const sharePct =
-    shareVal != null && supplyVal != null && supplyVal > 0n
-      ? Number((shareVal * 10000n) / supplyVal) / 100
-      : null;
+  const defBase = useTokenMeta(deployment?.token0);
+  const defQuote = useTokenMeta(deployment?.token1);
+  const extraTokens = useMemo((): FaucetToken[] => {
+    const out: FaucetToken[] = [];
+    if (deployment?.token0 && defBase.symbol) {
+      out.push({
+        symbol: defBase.symbol,
+        name: defBase.symbol,
+        decimals: defBase.decimals ?? 18,
+        amountLabel: "",
+        color: defBase.color ?? "#3ecf8e",
+        category: "DeFi",
+        address: deployment.token0,
+      });
+    }
+    if (deployment?.token1 && defQuote.symbol) {
+      out.push({
+        symbol: defQuote.symbol,
+        name: defQuote.symbol,
+        decimals: defQuote.decimals ?? 18,
+        amountLabel: "",
+        color: defQuote.color ?? "#6ea8ff",
+        category: "DeFi",
+        address: deployment.token1,
+      });
+    }
+    return out;
+  }, [deployment?.token0, deployment?.token1, defBase.symbol, defBase.decimals, defBase.color, defQuote.symbol, defQuote.decimals, defQuote.color]);
+
+  const { poolId: selectedPoolId } = usePool(pair);
+  const { position: selected, isLoading: selectedLoading, refetch: refetchSelected } = usePairPosition(pair);
+  const others = positions.filter((p) => p.poolId !== selectedPoolId);
+
+  function refetchAll() {
+    refetch();
+    refetchSelected();
+  }
 
   return (
-    <div className="page-wrap">
+    <div className="page-wrap portfolio-wrap">
       <h1 className="page-title">Portfolio</h1>
-      <p className="page-sub">Your shares and accrued fees across bins of the configured pool.</p>
+      <p className="page-sub">
+        Read straight from the chain — no backend, no indexer. Pick a pair to manage it directly,
+        or claim fees and pull liquidity from any position below.
+      </p>
 
-      <div className="form-card">
-        {!isConnected ? (
-          <p className="muted">Connect a wallet to view positions.</p>
-        ) : (
-          <>
-            <dl className="stats">
-              <div>
-                <dt>Pending fee0</dt>
-                <dd className="tabular up">{fee0 != null ? fee0.toString() : "—"}</dd>
-              </div>
-              <div>
-                <dt>Pending fee1</dt>
-                <dd className="tabular up">{fee1 != null ? fee1.toString() : "—"}</dd>
-              </div>
-              <div>
-                <dt>Shares</dt>
-                <dd className="tabular">{shareVal != null ? String(shareVal) : "—"}</dd>
-              </div>
-              <div>
-                <dt>Pool share</dt>
-                <dd className="tabular">{sharePct != null ? `${sharePct.toFixed(2)}%` : "—"}</dd>
-              </div>
-            </dl>
-
-            <button
-              type="button"
-              className="cta"
-              onClick={collect}
-              disabled={isPending || confirming || !address}
-            >
-              {isPending || confirming ? "Confirm…" : "Collect fees"}
-            </button>
-
-            {
-              <>
-                <div className="row-2" style={{ marginTop: "0.75rem" }}>
-                  {WITHDRAW_PCTS.map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      className={withdrawPct === p ? "preset active" : "preset"}
-                      onClick={() => setWithdrawPct(p)}
-                    >
-                      Withdraw {p}%
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  className="cta"
-                  style={{ marginTop: "0.5rem" }}
-                  onClick={withdraw}
-                  disabled={isPending || confirming || !address || (sharesQ.data ?? 0n) === 0n}
-                >
-                  {isPending || confirming ? "Confirm…" : "Remove liquidity"}
-                </button>
-              </>
-            }
-
-            {status && <p className="status">{status}</p>}
-          </>
+      <div className="console-topbar">
+        <TokenSelect
+          value={baseAddr ?? deployment?.token0 ?? ZERO_ADDRESS}
+          onSelect={(a) => selectAt("base", a)}
+          extraTokens={extraTokens}
+          align="left"
+        />
+        <span className="muted">/</span>
+        <TokenSelect value={quoteAddr ?? deployment?.token1 ?? ZERO_ADDRESS} onSelect={(a) => selectAt("quote", a)} extraTokens={extraTokens} />
+        <span className="console-topbar-spacer" />
+        {isConnected && !pairInvalid && !selectedLoading && (
+          <span className={selected ? "pool-status ok" : "pool-status warn"}>
+            <span className="pool-status-dot" />
+            {selected ? "Position open" : "No position"}
+          </span>
         )}
       </div>
+
+      {!isConnected ? (
+        <div className="form-card portfolio-empty">
+          <p className="muted">Connect a wallet to view your positions.</p>
+        </div>
+      ) : pairInvalid ? (
+        <div className="form-card portfolio-empty">
+          <p className="muted">Pick two different tokens to continue.</p>
+        </div>
+      ) : (
+        <>
+          {selectedLoading ? (
+            <div className="positions-grid positions-grid-single">
+              <PositionSkeleton />
+            </div>
+          ) : selected ? (
+            <div className="positions-grid positions-grid-single">
+              <PositionCard key={selected.poolId} position={selected} onChanged={refetchAll} />
+            </div>
+          ) : (
+            <div className="form-card portfolio-empty">
+              <p className="muted">No position in this pair yet.</p>
+              <Link href="/liquidity" className="cta" style={{ display: "inline-block", width: "auto", padding: "0.75rem 1.5rem" }}>
+                Add liquidity
+              </Link>
+            </div>
+          )}
+
+          {isLoading ? (
+            others.length === 0 && (
+              <>
+                <h2 className="portfolio-subhead">Other positions</h2>
+                <div className="positions-grid">
+                  <PositionSkeleton />
+                </div>
+              </>
+            )
+          ) : (
+            others.length > 0 && (
+              <>
+                <h2 className="portfolio-subhead">Other positions</h2>
+                <div className="positions-grid">
+                  {others.map((p) => (
+                    <PositionCard key={p.poolId} position={p} onChanged={refetchAll} />
+                  ))}
+                </div>
+              </>
+            )
+          )}
+        </>
+      )}
     </div>
   );
 }

@@ -147,6 +147,36 @@ export const binBookAbi = [
   },
   {
     type: "function",
+    name: "createPool",
+    inputs: [
+      {
+        name: "key",
+        type: "tuple",
+        internalType: "struct PoolKey",
+        components: [
+          { name: "currency0", type: "address", internalType: "Currency" },
+          { name: "currency1", type: "address", internalType: "Currency" },
+          { name: "fee", type: "uint24", internalType: "uint24" },
+          { name: "tickSpacing", type: "int24", internalType: "int24" },
+          { name: "hooks", type: "address", internalType: "contract IHooks" },
+        ],
+      },
+      {
+        name: "sqrtPriceX96",
+        type: "uint160",
+        internalType: "uint160",
+      },
+      {
+        name: "_binSize",
+        type: "int24",
+        internalType: "int24",
+      },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
     name: "binSizeSet",
     inputs: [
       {
@@ -209,11 +239,6 @@ export const binBookAbi = [
         name: "sqrtPriceX96",
         type: "uint160",
         internalType: "uint160",
-      },
-      {
-        name: "configured",
-        type: "bool",
-        internalType: "bool",
       },
       {
         name: "seeded",
@@ -376,10 +401,10 @@ export const binBookAbi = [
   },
   {
     type: "function",
-    name: "isConfigured",
+    name: "initializedPools",
     inputs: [
       {
-        name: "id",
+        name: "",
         type: "bytes32",
         internalType: "PoolId",
       },
@@ -834,6 +859,44 @@ export const binBookAbi = [
       },
       {
         name: "maxBin",
+        type: "int24",
+        indexed: false,
+        internalType: "int24",
+      },
+    ],
+    anonymous: false,
+  },
+  {
+    type: "event",
+    name: "PoolCreated",
+    inputs: [
+      {
+        name: "poolId",
+        type: "bytes32",
+        indexed: true,
+        internalType: "PoolId",
+      },
+      {
+        name: "creator",
+        type: "address",
+        indexed: true,
+        internalType: "address",
+      },
+      {
+        name: "key",
+        type: "tuple",
+        indexed: false,
+        internalType: "struct PoolKey",
+        components: [
+          { name: "currency0", type: "address", internalType: "Currency" },
+          { name: "currency1", type: "address", internalType: "Currency" },
+          { name: "fee", type: "uint24", internalType: "uint24" },
+          { name: "tickSpacing", type: "int24", internalType: "int24" },
+          { name: "hooks", type: "address", internalType: "contract IHooks" },
+        ],
+      },
+      {
+        name: "binSize",
         type: "int24",
         indexed: false,
         internalType: "int24",

@@ -44,3 +44,29 @@ export function formatPriceHuman(p: number, sigFigs = 4): string {
   const sig = mantissa.toPrecision(sigFigs).replace(".", "").slice(0, sigFigs);
   return `0.0${toSubscript(zeroCount)}${sig}`;
 }
+
+const SUPERSCRIPT_DIGITS = ["⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"];
+
+function toSuperscript(n: number): string {
+  return String(n)
+    .split("")
+    .map((d) => SUPERSCRIPT_DIGITS[Number(d)])
+    .join("");
+}
+
+/**
+ * Human-readable integer, for raw on-chain counters too large to read at a glance (e.g. LP
+ * "shares", which are an opaque internal accounting unit — not a token amount — so there's no
+ * decimals count to divide by). Comma-formats below a million; above that, scientific notation
+ * with a superscript exponent ("5.00 × 10²⁷") reads at a glance instead of a 28-digit number.
+ */
+export function formatBigIntCompact(n: bigint, sigFigs = 3): string {
+  if (n === 0n) return "0";
+  const neg = n < 0n;
+  const digits = (neg ? -n : n).toString();
+  if (digits.length <= 6) return n.toLocaleString();
+  const exp = digits.length - 1;
+  const mantissaDigits = digits.slice(0, sigFigs).padEnd(sigFigs, "0");
+  const mantissa = `${mantissaDigits[0]}.${mantissaDigits.slice(1)}`;
+  return `${neg ? "-" : ""}${mantissa} × 10${toSuperscript(exp)}`;
+}

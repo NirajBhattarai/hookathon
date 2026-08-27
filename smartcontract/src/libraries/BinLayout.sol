@@ -102,29 +102,33 @@ library BinLayout {
     /// @dev Validates alignment (`tick % binSize == 0` on both edges), tick bounds, and the
     ///      per-add bin cap, then derives the inclusive bin range `[tickLower/binSize, tickUpper/binSize - 1]`
     ///      and its auto-floored decay radius. `cur` is resolved from `b` itself.
-    /// @param b The pool's book state (binSize, ramp, and active-bin source)
+    /// @param book The pool's book state (binSize, ramp, and active-bin source)
     /// @param tickLower Lower tick of the requested range, must be bin-aligned
     /// @param tickUpper Upper tick of the requested range, must be bin-aligned and greater than tickLower
-    /// @return w Resolved window ready for liquidity distribution
-    function resolveWindow(Book storage b, int24 tickLower, int24 tickUpper) internal view returns (Window memory w) {
+    /// @return window Resolved window ready for liquidity distribution
+    function resolveWindow(Book storage book, int24 tickLower, int24 tickUpper)
+        internal
+        view
+        returns (Window memory window)
+    {
         if (tickLower >= tickUpper) revert InvalidTickRange();
 
-        (,, int24 cur) = binRange(b);
-        w.cur = cur;
+        (,, int24 cur) = binRange(book);
+        window.cur = cur;
 
-        if (tickLower % b.binSize != 0 || tickUpper % b.binSize != 0) revert TicksNotAlignedToBins();
+        if (tickLower % book.binSize != 0 || tickUpper % book.binSize != 0) revert TicksNotAlignedToBins();
         if (tickLower < TickMath.MIN_TICK || tickUpper > TickMath.MAX_TICK) revert InvalidTickRange();
 
-        int24 userMin = tickLower / b.binSize;
-        int24 userMax = tickUpper / b.binSize - 1;
+        int24 userMin = tickLower / book.binSize;
+        int24 userMax = tickUpper / book.binSize - 1;
         if (userMax < userMin) revert InvalidTickRange();
 
         uint256 n = uint256(int256(userMax - userMin + 1));
         if (n > MAX_BINS_PER_ADD) revert TooManyBins();
 
-        w.minB = userMin;
-        w.maxB = userMax;
-        w.ramp = resolveRamp(userMin, userMax, cur, b.ramp);
+        window.minB = userMin;
+        window.maxB = userMax;
+        window.ramp = resolveRamp(userMin, userMax, cur, book.ramp);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -162,11 +166,11 @@ library BinLayout {
     ///      Returns 0 when the budgets are too dust to fund probe-scale liquidity — the caller
     ///      owns the revert policy (BinBook reverts `ZeroAmounts` there).
     /// @param book The pool's book state (price source)
-    /// @param w Window from `resolveWindow` (bins, active bin, ramp)
+    /// @param window Window from `resolveWindow` (bins, active bin, ramp)
     /// @param amount0Desired Caller's token0 budget; 0 skips token0-needing bins
     /// @param amount1Desired Caller's token1 budget; 0 skips token1-needing bins
     /// @return lBase Root liquidity scaling factor; 0 signals degenerate budgets
-    function solveLBase(Book storage book, Window memory w, uint256 amount0Desired, uint256 amount1Desired)
+    function solveLBase(Book storage book, Window memory window, uint256 amount0Desired, uint256 amount1Desired)
         internal
         view
         returns (uint256 lBase)
@@ -175,8 +179,8 @@ library BinLayout {
         uint256 need1;
         uint256 probe = 1e18;
 
-        for (int24 idx = w.minB; idx <= w.maxB; ++idx) {
-            uint256 liquidity = SwapMath.computeLPerBin(probe, w.ramp, binDistance(idx, w.cur));
+        for (int24 idx = window.minB; idx <= window.maxB; ++idx) {
+            uint256 liquidity = SwapMath.computeLPerBin(probe, window.ramp, binDistance(idx, window.cur));
             if (liquidity == 0) continue;
             (uint256 t0, uint256 t1) = amountsFor(book, idx, liquidity);
             if (amount0Desired == 0 && t0 > 0) continue;
@@ -198,8 +202,8 @@ library BinLayout {
     /// @dev Mirrors the `solveLBase` walk bin-for-bin (same skip rules for zero budgets), so the
     ///      returned amounts always fit the budgets that produced `lBase`. Book expansion is the
     ///      caller's job — it emits the owner contract's `BookExpanded` event.
-    /// @param b The pool's book state (price source)
-    /// @param w Window from `resolveWindow` (bins, active bin, ramp)
+    /// @param book The pool's book state (price source)
+    /// @param window Window from `resolveWindow` (bins, active bin, ramp)
     /// @param lBase Root liquidity from `solveLBase`
     /// @param amount0Desired Caller's token0 budget; 0 skips token0-needing bins
     /// @param amount1Desired Caller's token1 budget; 0 skips token1-needing bins
@@ -212,8 +216,8 @@ library BinLayout {
     /// @return amount0 Total token0 required by the funded bins
     /// @return amount1 Total token1 required by the funded bins
     function depositLBase(
-        Book storage b,
-        Window memory w,
+        Book storage book,
+        Window memory window,
         uint256 lBase,
         uint256 amount0Desired,
         uint256 amount1Desired,
@@ -226,10 +230,10 @@ library BinLayout {
         ) storage userPositions,
         mapping(address depositor => UserRange) storage ranges
     ) internal returns (uint256 amount0, uint256 amount1) {
-        for (int24 idx = w.minB; idx <= w.maxB; ++idx) {
-            uint256 addL = SwapMath.computeLPerBin(lBase, w.ramp, binDistance(idx, w.cur));
+        for (int24 idx = window.minB; idx <= window.maxB; ++idx) {
+            uint256 addL = SwapMath.computeLPerBin(lBase, window.ramp, binDistance(idx, window.cur));
             if (addL == 0) continue;
-            (uint256 t0, uint256 t1) = amountsFor(b, idx, addL);
+            (uint256 t0, uint256 t1) = amountsFor(book, idx, addL);
             if (amount0Desired == 0 && t0 > 0) continue;
             if (amount1Desired == 0 && t1 > 0) continue;
             amount0 += t0;

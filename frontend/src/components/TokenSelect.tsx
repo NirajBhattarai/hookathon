@@ -22,12 +22,17 @@ export function TokenSelect({
   onSelect,
   disabled,
   extraTokens,
+  align = "right",
 }: {
   value: Address;
   onSelect: (a: Address) => void;
   disabled?: boolean;
   /** Extra rows to offer beyond the faucet list — e.g. a configured pair's tokens that aren't in it. */
   extraTokens?: FaucetToken[];
+  /** Which edge the dropdown hangs from — "right" (default) fits selects placed near a panel's
+   *  right edge; use "left" for one sitting near the left edge, so the menu doesn't overflow the
+   *  viewport. */
+  align?: "left" | "right";
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -85,7 +90,7 @@ export function TokenSelect({
       </button>
 
       {open && (
-        <div className="tok-menu" role="listbox">
+        <div className={align === "left" ? "tok-menu tok-menu-left" : "tok-menu"} role="listbox">
           <input
             className="faucet-search tok-search"
             placeholder="Search token…"
