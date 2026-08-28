@@ -57,6 +57,17 @@ library BinLayout {
         bool set;
     }
 
+    /// @dev What one bin would cost at `REFERENCE_L` — `solveLBase` computes this per bin to
+    ///      measure the window's total token cost; `depositLBase` scales it by the real `lBase`
+    ///      instead of recomputing from scratch. A zeroed entry (`liquidity == 0`) marks a bin
+    ///      `solveLBase` skipped (degenerate weight, or the caller's budget was zero for the
+    ///      token that bin needs).
+    struct ReferenceBin {
+        uint256 liquidity;
+        uint256 amount0;
+        uint256 amount1;
+    }
+
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -66,6 +77,11 @@ library BinLayout {
 
     /// @dev Cap on the total contiguous bin span a book may ever grow to.
     uint16 public constant MAX_BOOK_BINS = 1024;
+
+    /// @dev Reference root liquidity `solveLBase` measures token cost against — an arbitrary
+    ///      yardstick, not a real quantity. Large enough that ramp-decayed far bins don't floor
+    ///      to zero liquidity before their token cost can be measured.
+    uint256 private constant REFERENCE_L = 1e18;
 
     /*//////////////////////////////////////////////////////////////
                                   ERRORS
@@ -216,9 +232,13 @@ library BinLayout {
     }
 
     /// @notice Read-only solve for the root liquidity `LBase` across a resolved window.
-    /// @dev Probes the window with a unit LBase, sums the token0/token1 each bin would need
+    /// @dev Probes the window with `REFERENCE_L`, sums the token0/token1 each bin would need
     ///      (ramp-decayed via linear decay), then scales by the desired amounts and takes the
-    ///      smaller scalar so the result never exceeds either token budget when deployed.
+    ///      smaller scalar so the result never exceeds either token budget when deployed. Also
+    ///      returns the per-bin reference liquidity/amounts computed along the way, so
+    ///      `depositLBase` can scale them directly instead of recomputing from scratch — two
+    ///      independent recomputations of the same per-bin math previously drifted apart under
+    ///      floor rounding, letting deposits overspend a caller's budget by a meaningful amount.
     ///      Returns 0 when the budgets are too dust to fund probe-scale liquidity — the caller
     ///      owns the revert policy (BinBook reverts `ZeroAmounts` there).
     /// @param book The pool's book state (price source)
@@ -226,43 +246,58 @@ library BinLayout {
     /// @param amount0Desired Caller's token0 budget; 0 skips token0-needing bins
     /// @param amount1Desired Caller's token1 budget; 0 skips token1-needing bins
     /// @return lBase Root liquidity scaling factor; 0 signals degenerate budgets
+    /// @return refBins Per-bin cost at `REFERENCE_L`, indexed by `idx - window.minB` (feed
+    ///         straight into `depositLBase`); a zeroed entry marks a bin `solveLBase` skipped
     function solveLBase(Book storage book, Window memory window, uint256 amount0Desired, uint256 amount1Desired)
         internal
         view
-        returns (uint256 lBase)
+        returns (uint256 lBase, ReferenceBin[] memory refBins)
     {
+        uint256 n = uint256(int256(window.maxB - window.minB + 1));
+        refBins = new ReferenceBin[](n);
+
         uint256 need0;
         uint256 need1;
-        uint256 probe = 1e18;
 
-        for (int24 idx = window.minB; idx <= window.maxB; ++idx) {
-            uint256 liquidity = SwapMath.computeLPerBin(probe, window.ramp, binDistance(idx, window.cur));
+        for (uint256 i = 0; i < n; ++i) {
+            int24 idx = window.minB + int24(int256(i));
+            uint256 liquidity = SwapMath.computeLPerBin(REFERENCE_L, window.ramp, binDistance(idx, window.cur));
             if (liquidity == 0) continue;
             (uint256 t0, uint256 t1) = tokenAmountsForBin(book, idx, liquidity);
             if (amount0Desired == 0 && t0 > 0) continue;
             if (amount1Desired == 0 && t1 > 0) continue;
+
+            refBins[i] = ReferenceBin({liquidity: liquidity, amount0: t0, amount1: t1});
             need0 += t0;
             need1 += t1;
         }
 
         if (need0 == 0 && need1 == 0) revert SwapMath.InsufficientLiquidity();
 
-        uint256 s0 = need0 == 0 ? type(uint256).max : amount0Desired * probe / need0;
-        uint256 s1 = need1 == 0 ? type(uint256).max : amount1Desired * probe / need1;
+        // need0/need1 are the token cost of REFERENCE_L; rescale by the tighter budget's ratio
+        // to solve for the real root liquidity that fits it.
+        uint256 s0 = need0 == 0 ? type(uint256).max : amount0Desired * REFERENCE_L / need0;
+        uint256 s1 = need1 == 0 ? type(uint256).max : amount1Desired * REFERENCE_L / need1;
         lBase = s0 < s1 ? s0 : s1;
     }
 
-    /// @notice State-changing counterpart to `solveLBase`: walks the same window applying the
-    ///         solved `lBase` per bin (ramp-decayed) to credit user L and total up the real
-    ///         token0/token1 pulled in.
-    /// @dev Mirrors the `solveLBase` walk bin-for-bin (same skip rules for zero budgets), so the
-    ///      returned amounts always fit the budgets that produced `lBase`. Book expansion is the
-    ///      caller's job — it emits the owner contract's `BookExpanded` event.
-    /// @param book The pool's book state (price source)
-    /// @param window Window from `resolveWindow` (bins, active bin, ramp)
+    /// @notice State-changing counterpart to `solveLBase`: scales the per-bin reference values
+    ///         `solveLBase` already computed by the solved `lBase`, crediting user L and totaling
+    ///         up the real token0/token1 pulled in.
+    /// @dev Scales `solveLBase`'s cached `ReferenceBin`s by `lBase / REFERENCE_L` instead of
+    ///      recomputing each bin from scratch — a bin's liquidity, amount0, and amount1 are all
+    ///      proportional to the same reference liquidity, so one shared scale-down keeps them
+    ///      exactly consistent with each other. The scale-down is still a floor division, so a
+    ///      bin can still drift a hair over what's left of either budget; clamp it back by
+    ///      scaling further down to fit (token amounts are linear in L — see
+    ///      `getTokenAmountsForBin` — so this stays exact). This makes "never exceed
+    ///      amountXDesired" a hard invariant. Book expansion is the caller's job — it emits the
+    ///      owner contract's `BookExpanded` event.
+    /// @param minB Lowest bin index of the window (`refBins[i]` is bin `minB + i`)
     /// @param lBase Root liquidity from `solveLBase`
-    /// @param amount0Desired Caller's token0 budget; 0 skips token0-needing bins
-    /// @param amount1Desired Caller's token1 budget; 0 skips token1-needing bins
+    /// @param refBins Per-bin reference cost from `solveLBase`
+    /// @param amount0Desired Caller's token0 budget
+    /// @param amount1Desired Caller's token1 budget
     /// @param account Depositor whose positions are credited
     /// @param totalLiquidity Per-pool total L per bin (`liquidity[poolId]`)
     /// @param feeGrowth0 Per-pool token0 fee growth per bin (`feeGrowth0X128[poolId]`)
@@ -272,9 +307,9 @@ library BinLayout {
     /// @return amount0 Total token0 required by the funded bins
     /// @return amount1 Total token1 required by the funded bins
     function depositLBase(
-        Book storage book,
-        Window memory window,
+        int24 minB,
         uint256 lBase,
+        ReferenceBin[] memory refBins,
         uint256 amount0Desired,
         uint256 amount1Desired,
         address account,
@@ -286,15 +321,40 @@ library BinLayout {
         ) storage userPositions,
         mapping(address depositor => UserRange) storage ranges
     ) internal returns (uint256 amount0, uint256 amount1) {
-        for (int24 idx = window.minB; idx <= window.maxB; ++idx) {
-            uint256 addL = SwapMath.computeLPerBin(lBase, window.ramp, binDistance(idx, window.cur));
+        uint256 remaining0 = amount0Desired;
+        uint256 remaining1 = amount1Desired;
+
+        for (uint256 i = 0; i < refBins.length; ++i) {
+            ReferenceBin memory ref = refBins[i];
+            if (ref.liquidity == 0) continue;
+
+            uint256 addL = FullMath.mulDiv(ref.liquidity, lBase, REFERENCE_L);
+            uint256 t0 = FullMath.mulDiv(ref.amount0, lBase, REFERENCE_L);
+            uint256 t1 = FullMath.mulDiv(ref.amount1, lBase, REFERENCE_L);
             if (addL == 0) continue;
-            (uint256 t0, uint256 t1) = tokenAmountsForBin(book, idx, addL);
-            if (amount0Desired == 0 && t0 > 0) continue;
-            if (amount1Desired == 0 && t1 > 0) continue;
+
+            if (t0 > remaining0 || t1 > remaining1) {
+                uint256 ratioX128 = type(uint256).max;
+                if (t0 > 0) ratioX128 = FullMath.mulDiv(remaining0, FixedPoint128.Q128, t0);
+                if (t1 > 0) {
+                    uint256 r1 = FullMath.mulDiv(remaining1, FixedPoint128.Q128, t1);
+                    if (r1 < ratioX128) ratioX128 = r1;
+                }
+                addL = FullMath.mulDiv(addL, ratioX128, FixedPoint128.Q128);
+                t0 = FullMath.mulDiv(t0, ratioX128, FixedPoint128.Q128);
+                t1 = FullMath.mulDiv(t1, ratioX128, FixedPoint128.Q128);
+                if (addL == 0) continue;
+                // Belt-and-suspenders: bound any leftover sub-wei rounding to the budget itself.
+                if (t0 > remaining0) t0 = remaining0;
+                if (t1 > remaining1) t1 = remaining1;
+            }
+
+            remaining0 -= t0;
+            remaining1 -= t1;
             amount0 += t0;
             amount1 += t1;
 
+            int24 idx = minB + int24(int256(i));
             Position storage p = userPositions[account][idx];
             // Two independent steps, called out explicitly rather than bundled behind one
             // wrapper: settle fees against the *pre-increase* L, then bump L. Order matters —

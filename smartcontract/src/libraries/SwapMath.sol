@@ -292,6 +292,42 @@ library SwapMath {
         amount1 = totalToken1 * sharesToBurn / totalSupply;
     }
 
+    /// @notice Mints shares proportional to a deposit's value, not its raw token amounts.
+    /// @dev Converts amount1/reserve1 into token0-equivalent terms via the pool's live price
+    ///      before comparing anything — token0 and token1 units are otherwise incomparable
+    ///      (different decimals, different real value per unit), so summing them directly
+    ///      (`amount0 + amount1`) would misprice a deposit based on which token it happened to
+    ///      land in. Numerator (this deposit) and denominator (the pool's existing reserves) are
+    ///      valued with the *same* live price, so it doesn't matter what price was in effect for
+    ///      any prior deposit — every mint is a fresh, self-consistent snapshot.
+    /// @param amount0 This deposit's token0 amount
+    /// @param amount1 This deposit's token1 amount
+    /// @param reserve0 Pool's token0 claim balance before this deposit settles
+    /// @param reserve1 Pool's token1 claim balance before this deposit settles
+    /// @param sqrtPriceX96 Pool's current sqrt price
+    /// @param totalSupply Existing total shares outstanding; 0 signals the bootstrap deposit
+    /// @return shares Shares to mint for this deposit
+    function getMintShares(
+        uint256 amount0,
+        uint256 amount1,
+        uint256 reserve0,
+        uint256 reserve1,
+        uint160 sqrtPriceX96,
+        uint256 totalSupply
+    ) internal pure returns (uint256 shares) {
+        uint256 priceX96 = FullMath.mulDiv(sqrtPriceX96, sqrtPriceX96, Q96);
+        uint256 depositValue = amount0 + FullMath.mulDiv(amount1, Q96, priceX96);
+
+        if (totalSupply == 0) {
+            // Bootstrap: no existing value to compare against, so this deposit necessarily sets
+            // the initial shares-per-value exchange rate.
+            return depositValue;
+        }
+
+        uint256 totalValueBefore = reserve0 + FullMath.mulDiv(reserve1, Q96, priceX96);
+        shares = FullMath.mulDiv(depositValue, totalSupply, totalValueBefore);
+    }
+
     // ── private ──────────────────────────────────────────────────────────
 
     function _clamp(uint160 p, uint160 lo, uint160 hi) private pure returns (uint160) {

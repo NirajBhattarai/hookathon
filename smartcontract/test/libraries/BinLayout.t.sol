@@ -384,7 +384,7 @@ contract BinLayoutTest is Test {
         book.sqrtPriceX96 = TickMath.getSqrtPriceAtTick(-115135);
 
         BinLayout.Window memory w = book.resolveWindow(-115230, -115030);
-        uint256 lBase = book.solveLBase(w, 1 ether, 100_000 ether);
+        (uint256 lBase,) = book.solveLBase(w, 1 ether, 100_000 ether);
 
         // inline reference
         uint256 probe = 1e18;
@@ -423,11 +423,11 @@ contract BinLayoutTest is Test {
         uint256 a1 = a0 * 7 / 3; // correlated but distinct second budget
         uint256 k = bound(rawK, 2, 500);
 
-        uint256 base = book.solveLBase(w, a0, a1);
+        (uint256 base,) = book.solveLBase(w, a0, a1);
         // skip dust budgets where a single wei of floor-rounding dominates the ratio
         vm.assume(base > 1e15);
 
-        uint256 scaled = book.solveLBase(w, a0 * k, a1 * k);
+        (uint256 scaled,) = book.solveLBase(w, a0 * k, a1 * k);
         assertApproxEqRel(scaled, base * k, 1e9);
     }
 
@@ -478,20 +478,31 @@ contract BinLayoutTest is Test {
         book.sqrtPriceX96 = TickMath.getSqrtPriceAtTick(-115135);
 
         BinLayout.Window memory w = book.resolveWindow(-115230, -115030);
-        uint256 lBase = book.solveLBase(w, 1 ether, 100_000 ether);
+        (uint256 lBase, BinLayout.ReferenceBin[] memory refBins) = book.solveLBase(w, 1 ether, 100_000 ether);
         assertGt(lBase, 0);
 
-        (uint256 amount0, uint256 amount1) = book.depositLBase(
-            w, lBase, 1 ether, 100_000 ether, USER, _totalLiquidity, _feeGrowth0, _feeGrowth1, _positions, _userRanges
+        (uint256 amount0, uint256 amount1) = BinLayout.depositLBase(
+            w.minB,
+            lBase,
+            refBins,
+            1 ether,
+            100_000 ether,
+            USER,
+            _totalLiquidity,
+            _feeGrowth0,
+            _feeGrowth1,
+            _positions,
+            _userRanges
         );
 
         // Both amounts are nonzero — price sits below all bins, so both token0 and token1 are needed
         assertGt(amount0, 0);
         assertGt(amount1, 0);
 
-        // Allow small floor-rounding excess from probe-and-scale (dust relative to budget)
-        assertLe(amount0, 1 ether + 64);
-        assertLe(amount1, 100_000 ether + 64);
+        // depositLBase clamps each bin's contribution against remaining budget, so spend can
+        // never exceed what was authorized.
+        assertLe(amount0, 1 ether);
+        assertLe(amount1, 100_000 ether);
 
         // Verify per-bin liquidity was credited
         BinLayout.UserRange memory r = _userRanges[USER];
@@ -511,10 +522,20 @@ contract BinLayoutTest is Test {
         book.sqrtPriceX96 = TickMath.getSqrtPriceAtTick(-115135);
 
         BinLayout.Window memory w = book.resolveWindow(-115230, -115030);
-        uint256 lBase = book.solveLBase(w, 1 ether, 100_000 ether);
+        (uint256 lBase, BinLayout.ReferenceBin[] memory refBins) = book.solveLBase(w, 1 ether, 100_000 ether);
 
-        (uint256 amount0, uint256 amount1) = book.depositLBase(
-            w, lBase, 1 ether, 100_000 ether, USER, _totalLiquidity, _feeGrowth0, _feeGrowth1, _positions, _userRanges
+        (uint256 amount0, uint256 amount1) = BinLayout.depositLBase(
+            w.minB,
+            lBase,
+            refBins,
+            1 ether,
+            100_000 ether,
+            USER,
+            _totalLiquidity,
+            _feeGrowth0,
+            _feeGrowth1,
+            _positions,
+            _userRanges
         );
 
         // Shares = sum of actual spent — this is what BinBook uses
@@ -528,17 +549,26 @@ contract BinLayoutTest is Test {
         book.sqrtPriceX96 = TickMath.getSqrtPriceAtTick(-115135);
 
         BinLayout.Window memory w = book.resolveWindow(-115230, -115030);
-        uint256 lBase = book.solveLBase(w, 0, 100_000 ether);
+        (uint256 lBase, BinLayout.ReferenceBin[] memory refBins) = book.solveLBase(w, 0, 100_000 ether);
         assertGt(lBase, 0);
 
-        (uint256 amount0, uint256 amount1) = book.depositLBase(
-            w, lBase, 0, 100_000 ether, USER, _totalLiquidity, _feeGrowth0, _feeGrowth1, _positions, _userRanges
+        (uint256 amount0, uint256 amount1) = BinLayout.depositLBase(
+            w.minB,
+            lBase,
+            refBins,
+            0,
+            100_000 ether,
+            USER,
+            _totalLiquidity,
+            _feeGrowth0,
+            _feeGrowth1,
+            _positions,
+            _userRanges
         );
 
         assertEq(amount0, 0, "token0 budget was zero");
         assertGt(amount1, 0);
-        // Allow floor-rounding excess from probe-and-scale
-        assertLe(amount1, 100_000 ether + 100_000 ether / 100_000);
+        assertLe(amount1, 100_000 ether);
     }
 
     /// @dev Fuzz: deposit amounts never exceed either budget.
@@ -563,16 +593,15 @@ contract BinLayoutTest is Test {
         uint256 a1 = bound(rawA1, 1e18, 1e24);
         if (a0 == 0 && a1 == 0) return;
 
-        uint256 lBase = book.solveLBase(w, a0, a1);
+        (uint256 lBase, BinLayout.ReferenceBin[] memory refBins) = book.solveLBase(w, a0, a1);
         if (lBase == 0) return;
 
-        (uint256 amount0, uint256 amount1) = book.depositLBase(
-            w, lBase, a0, a1, USER, _totalLiquidity, _feeGrowth0, _feeGrowth1, _positions, _userRanges
+        (uint256 amount0, uint256 amount1) = BinLayout.depositLBase(
+            w.minB, lBase, refBins, a0, a1, USER, _totalLiquidity, _feeGrowth0, _feeGrowth1, _positions, _userRanges
         );
 
-        // Allow per-bin floor-rounding excess from probe-and-scale
-        assertLe(amount0, a0 + a0 / 100_000, "token0 exceeds budget + rounding");
-        assertLe(amount1, a1 + a1 / 100_000, "token1 exceeds budget + rounding");
+        assertLe(amount0, a0, "token0 exceeds budget");
+        assertLe(amount1, a1, "token1 exceeds budget");
     }
 
     /*//////////////////////////////////////////////////////////////

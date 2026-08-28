@@ -152,10 +152,24 @@ contract BinBook is BaseCustomCurve {
 
         BinLayout.Window memory window = books[id].resolveWindow(params.tickLower, params.tickUpper);
 
-        uint256 lBase = books[id].solveLBase(window, params.amount0Desired, params.amount1Desired);
+        (uint256 lBase, BinLayout.ReferenceBin[] memory refBins) =
+            books[id].solveLBase(window, params.amount0Desired, params.amount1Desired);
         if (lBase == 0) revert ZeroAmounts();
-        (amount0, amount1) = _depositLBase(id, window, lBase, params.amount0Desired, params.amount1Desired, msg.sender);
-        shares = amount0 + amount1;
+
+        (amount0, amount1) =
+            _depositLBase(id, window, lBase, refBins, params.amount0Desired, params.amount1Desired, msg.sender);
+
+        // Read after depositLBase (bookkeeping-only, no settlement — that happens later in
+        // _modifyLiquidity), so these are still the pool's reserves as of "right now", the same
+        // instant priced below.
+        shares = SwapMath.getMintShares(
+            amount0,
+            amount1,
+            poolManager.balanceOf(address(this), key.currency0.toId()),
+            poolManager.balanceOf(address(this), key.currency1.toId()),
+            books[id].sqrtPriceX96,
+            totalShares[id]
+        );
         if (shares == 0) revert ZeroAmounts();
     }
 
@@ -170,13 +184,22 @@ contract BinBook is BaseCustomCurve {
         shares = params.liquidity;
         if (shares == 0 || shares > userShares) revert InsufficientShares();
 
-        uint256 supply = totalShares[id];
-        // currency.toId() is preferred; unwrap works for ERC20 address ids used by PoolManager claims
-        uint256 claim0 = poolManager.balanceOf(address(this), key.currency0.toId());
-        uint256 claim1 = poolManager.balanceOf(address(this), key.currency1.toId());
-        (amount0, amount1) = SwapMath.getWithdrawAmounts(claim0, claim1, shares, supply);
+        // Redeem directly from this user's own bins/positions (their own L, priced at the
+        // current bin prices) rather than a pool-wide proportional slice of aggregate claim
+        // balances — a blended, pool-wide payout would hand a withdrawing user tokens that never
+        // backed their own position at all, at the expense of other LPs in disjoint bins.
+        (amount0, amount1) = _decreaseUserL(id, msg.sender, shares, userShares);
 
-        _decreaseUserL(id, msg.sender, shares, userShares);
+        // tokenAmountsForBin recomputes token0/token1 fresh from L, while depositLBase derived
+        // the amounts originally taken in by proportionally scaling a shared per-bin reference
+        // (so a multi-bin deposit's total never drifts over its budget under floor rounding) —
+        // the two paths can disagree by a few wei per bin. Clamp to the pool's actual claim
+        // balance so that drift can never make a withdrawal try to pull out more than the hook
+        // holds.
+        uint256 avail0 = poolManager.balanceOf(address(this), key.currency0.toId());
+        uint256 avail1 = poolManager.balanceOf(address(this), key.currency1.toId());
+        if (amount0 > avail0) amount0 = avail0;
+        if (amount1 > avail1) amount1 = avail1;
     }
 
     function _getUnspecifiedAmount(PoolKey calldata key, SwapParams calldata params)
@@ -421,10 +444,16 @@ contract BinBook is BaseCustomCurve {
         b.currentBin = b.minBin + int24(int256(endIndex));
     }
 
-    /// @dev Reduce the caller's bin L proportional to shares burned / their total shares.
-    function _decreaseUserL(PoolId id, address user, uint256 sharesBurned, uint256 userShares) internal {
+    /// @dev Reduces the caller's bin L proportional to shares burned / their total shares, and
+    ///      returns the token0/token1 that L actually backs at each bin's current price — this
+    ///      user's own position, not a slice of the pool's aggregate reserves.
+    function _decreaseUserL(PoolId id, address user, uint256 sharesBurned, uint256 userShares)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
+        BinLayout.Book storage book = books[id];
         BinLayout.UserRange memory r = userRanges[id][user];
-        if (!r.set || userShares == 0) return;
+        if (!r.set || userShares == 0) return (0, 0);
 
         for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
             BinLayout.Position storage p = positions[id][user][idx];
@@ -434,10 +463,13 @@ contract BinBook is BaseCustomCurve {
             uint256 burnL = L * sharesBurned / userShares;
             if (burnL == 0) continue;
             if (burnL > L) burnL = L;
+
+            (uint256 t0, uint256 t1) = book.tokenAmountsForBin(idx, burnL);
+            amount0 += t0;
+            amount1 += t1;
+
             p.liquidity = uint128(L - burnL);
             liquidity[id][idx] -= uint128(burnL);
-            p.feeGrowth0LastX128 = feeGrowth0X128[id][idx];
-            p.feeGrowth1LastX128 = feeGrowth1X128[id][idx];
         }
     }
 
@@ -447,14 +479,16 @@ contract BinBook is BaseCustomCurve {
         PoolId id,
         BinLayout.Window memory window,
         uint256 lBase,
+        BinLayout.ReferenceBin[] memory refBins,
         uint256 amount0Desired,
         uint256 amount1Desired,
         address user
     ) internal returns (uint256 amount0, uint256 amount1) {
         _expandBook(id, window.minB, window.maxB, window.cur);
-        (amount0, amount1) = books[id].depositLBase(
-            window,
+        (amount0, amount1) = BinLayout.depositLBase(
+            window.minB,
             lBase,
+            refBins,
             amount0Desired,
             amount1Desired,
             user,

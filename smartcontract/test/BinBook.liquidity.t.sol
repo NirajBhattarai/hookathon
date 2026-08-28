@@ -10,9 +10,11 @@ import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol
 import {Constants} from "./utils/Constants.sol";
 
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 
 import {BinBook} from "../src/BinBook.sol";
 import {BinLayout} from "../src/libraries/BinLayout.sol";
+import {SwapMath} from "../src/libraries/SwapMath.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
@@ -397,10 +399,18 @@ contract BinBookLiquidityTest is BaseTest {
 
         hook.createPool(key, Constants.SQRT_PRICE_1_100000, 10);
 
-        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
-        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        MockERC20 token0 = MockERC20(Currency.unwrap(currency0));
+        MockERC20 token1 = MockERC20(Currency.unwrap(currency1));
+        token0.approve(address(hook), type(uint256).max);
+        token1.approve(address(hook), type(uint256).max);
 
-        hook.addLiquidity(
+        uint256 balance0Before = token0.balanceOf(address(this));
+        uint256 balance1Before = token1.balanceOf(address(this));
+
+        int24 tickLower = -115230;
+        int24 tickUpper = -115030;
+
+        BalanceDelta delta = hook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
                 amount0Desired: 1 ether,
@@ -408,42 +418,63 @@ contract BinBookLiquidityTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: -115230,
-                tickUpper: -115030,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
                 userInputSalt: bytes32(0)
             })
         );
 
         PoolId id = key.toId();
+
+        uint256 spent0 = uint256(uint128(-delta.amount0()));
+        uint256 spent1 = uint256(uint128(-delta.amount1()));
+        assertEq(balance0Before - token0.balanceOf(address(this)), spent0, "token0 pulled == delta");
+        assertEq(balance1Before - token1.balanceOf(address(this)), spent1, "token1 pulled == delta");
+
+        assertGt(spent0, 0, "active price sits inside range: token0 required");
+        assertGt(spent1, 0, "active price sits inside range: token1 required");
+
+        // depositLBase clamps each bin's contribution against remaining budget, so spend can
+        // never exceed what was authorized (see BinLayout.depositLBase) — no fudge factor needed.
+        assertLe(spent0, 1 ether, "never overspends amount0Desired");
+        assertLe(spent1, 100_000 ether, "never overspends amount1Desired");
+
+        // 2) Shares: sole depositor owns everything. Bootstrap shares are minted from this
+        // deposit's value (spent1 converted to token0-equivalent terms via the pool's live
+        // price), not the raw amount0+amount1 sum — see SwapMath.getMintShares.
         uint256 total = hook.getTotalShares(id);
         uint256 userShares = hook.getShares(id, address(this));
+        assertEq(userShares, total, "sole depositor owns 100% of shares");
+        uint256 expectedShares = SwapMath.getMintShares(spent0, spent1, 0, 0, hook.currentSqrtPriceX96(id), 0);
+        assertEq(total, expectedShares, "shares == deposit value at the live price");
+
+        int24 binSize = 10;
+
+        // 3) Book expanded to at least cover the requested tick range.
+        int24 userMin = tickLower / binSize;
+        int24 userMax = tickUpper / binSize - 1;
         int24 cur = hook.currentBin(id);
         int24 min = hook.minBin(id);
         int24 max = hook.maxBin(id);
+        assertLe(min, userMin, "book covers requested lower bound");
+        assertGe(max, userMax, "book covers requested upper bound");
+        assertTrue(cur >= userMin && cur <= userMax, "active bin sits inside the requested range");
 
-        console2.log("=== POOL STATE ===");
-        console2.log("totalShares:", total);
-        console2.log("userShares:", userShares);
-        console2.log("currentBin:");
-        console2.logInt(cur);
-        console2.log("minBin:");
-        console2.logInt(min);
-        console2.log("maxBin:");
-        console2.logInt(max);
-
-        uint256 bal0 = MockERC20(Currency.unwrap(currency0)).balanceOf(address(this));
-        uint256 bal1 = MockERC20(Currency.unwrap(currency1)).balanceOf(address(this));
-        console2.log("token0 remaining:", bal0);
-        console2.log("token1 remaining:", bal1);
-
-        console2.log("=== PER-BIN LIQUIDITY ===");
-        for (int24 i = min; i <= max; ++i) {
-            uint128 liq = hook.liquidityOf(id, address(this), i);
-            if (liq > 0) {
-                console2.log("bin:");
-                console2.logInt(i);
-                console2.log("  L:", liq);
-            }
+        // 4) Liquidity actually landed in every requested bin, credited solely to us.
+        for (int24 idx = userMin; idx <= userMax; ++idx) {
+            uint128 binL = hook.liquidity(id, idx);
+            assertGt(binL, 0, "every requested bin received liquidity");
+            assertEq(hook.liquidityOf(id, address(this), idx), binL, "sole depositor owns all L in the bin");
         }
+
+        // 5) Ramp decay: bins near the active price get >= L than the far edges.
+        uint128 centerL = hook.liquidityOf(id, address(this), cur);
+        assertGe(centerL, hook.liquidityOf(id, address(this), userMin), "ramp decays toward the low edge");
+        assertGe(centerL, hook.liquidityOf(id, address(this), userMax), "ramp decays toward the high edge");
+
+        // 6) Fresh position: fee checkpoint initialized, nothing owed yet.
+        (uint256 pending0, uint256 pending1) = hook.pendingFees(id, address(this));
+        assertEq(pending0, 0, "no swaps yet: no fees accrued");
+        assertEq(pending1, 0, "no swaps yet: no fees accrued");
     }
 }

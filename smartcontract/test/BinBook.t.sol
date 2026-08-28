@@ -401,8 +401,13 @@ contract BinBookTest is BaseTest {
         _approve();
         // Narrow range needs only ramp 4, but the no-ramp path keeps the DEFAULT_RAMP = 10 floor.
         _addRange(100 ether, 100 ether, -3 * 60, 3 * 60);
-        assertEq(hook.liquidity(poolId, -1), hook.liquidity(poolId, 0));
-        assertEq(uint256(hook.liquidity(poolId, -3)) * 9, uint256(hook.liquidity(poolId, 0)) * 7);
+        // depositLBase clamps the last bin(s) it touches so cumulative spend never exceeds
+        // amount0Desired/amount1Desired (see BinLayout.depositLBase) — a budget-fitting
+        // correction unrelated to the ramp formula itself, on the order of 1e-15 relative here.
+        // Compare with a tight relative tolerance instead of exact equality so this test still
+        // isolates ramp-formula correctness rather than budget-clamp precision.
+        assertApproxEqRel(hook.liquidity(poolId, -1), hook.liquidity(poolId, 0), 1e9);
+        assertApproxEqRel(uint256(hook.liquidity(poolId, -3)) * 9, uint256(hook.liquidity(poolId, 0)) * 7, 1e9);
     }
 
     // ── swap ─────────────────────────────────────────────────────────────
@@ -468,7 +473,9 @@ contract BinBookTest is BaseTest {
         int24 bin = -6;
         uint128 lAlice = hook.liquidityOf(poolId, address(this), bin);
         uint128 lBob = hook.liquidityOf(poolId, bob, bin);
-        assertApproxEqAbs(uint256(lAlice), uint256(lBob) * 2, 2);
+        // See test_ramp_legacyPath_stillFloorsAtDefaultRamp: depositLBase's budget clamp can
+        // trim the last bin(s) by a relative amount far smaller than the 2:1 ratio being tested.
+        assertApproxEqRel(uint256(lAlice), uint256(lBob) * 2, 1e9);
 
         swapRouter.swapExactTokensForTokens(2 ether, 0, true, poolKey, "", address(this), block.timestamp);
 
