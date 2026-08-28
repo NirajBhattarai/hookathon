@@ -126,8 +126,9 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
+        (int24 storedBinSize,,,,, , uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
+        assertEq(storedSqrtPriceX96, Constants.SQRT_PRICE_1_1, "starting sqrtPriceX96 stored as requested");
         assertFalse(seeded);
         assertTrue(hook.initializedPools(id));
     }
@@ -149,8 +150,9 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
+        (int24 storedBinSize,,,,, , uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
+        assertEq(storedSqrtPriceX96, Constants.SQRT_PRICE_1_1, "starting sqrtPriceX96 stored as requested");
         assertFalse(seeded);
         assertTrue(hook.initializedPools(id));
     }
@@ -164,8 +166,9 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, sqrtPriceX96, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,,,, bool seeded) = hook.books(id);
+        (int24 storedBinSize,,,,, , uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
+        assertEq(storedSqrtPriceX96, sqrtPriceX96, "starting sqrtPriceX96 stored as requested");
         assertFalse(seeded);
         assertTrue(hook.initializedPools(id));
     }
@@ -201,5 +204,56 @@ contract BinBookCreatePoolTest is BaseTest {
         assertFalse(hook.initializedPools(id));
         assertEq(hook.poolCreator(id), address(0));
         assertFalse(hook.initializedPools(key.toId()));
+    }
+
+    function test_revert_createPool_invalidHook_wrongHookAddress() public {
+        BinBook hookA = BinBook(flags);
+
+        // A second, distinct, validly-flagged hook instance — not the one createPool is called on.
+        address flagsB = address(uint160(HOOK_FLAGS) | (uint160(1) << 20));
+        deployCodeTo("BinBook.sol:BinBook", abi.encode(poolManager), flagsB);
+
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        PoolKey memory key =
+            PoolKey({currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(flagsB)});
+
+        vm.expectRevert(BinBook.InvalidHook.selector);
+        hookA.createPool(key, Constants.SQRT_PRICE_1_1, 10);
+    }
+
+    function test_revert_createPool_invalidHook_zeroAddress() public {
+        BinBook hook = BinBook(flags);
+
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        PoolKey memory key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(0))
+        });
+
+        vm.expectRevert(BinBook.InvalidHook.selector);
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 10);
+    }
+
+    /// @dev The two "equal/unsorted currencies" reverts above (lines 47-68) call
+    ///      `poolManager.initialize` directly with `hooks: address(0)` — testing v4-core's own
+    ///      validation, not BinBook's. This exercises BinBook's own currency-order check (the
+    ///      same `if` branch that also catches unsorted currencies) through the real gateway.
+    function test_revert_createPoolViaHook_withEqualCurrencies() public {
+        BinBook hook = BinBook(flags);
+        Currency currencyA = deployCurrency();
+
+        PoolKey memory key = PoolKey({
+            currency0: currencyA, currency1: currencyA, fee: 100, tickSpacing: 1, hooks: IHooks(address(hook))
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(IPoolManager.CurrenciesOutOfOrderOrEqual.selector, currencyA, currencyA));
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 10);
     }
 }

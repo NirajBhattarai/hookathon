@@ -19,7 +19,7 @@ import {BaseTest} from "./utils/BaseTest.sol";
 
 /// @dev Validates that BinBook's on-chain swap engine matches a pure-library simulation of
 ///      the same book state bit-exactly, plus general add/swap/remove/collect workflows.
-contract BinBookSwapEngineTest is BaseTest {
+contract BinBookSwapTest is BaseTest {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
