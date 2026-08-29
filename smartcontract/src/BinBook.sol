@@ -62,6 +62,20 @@ contract BinBook is BaseCustomCurve {
     mapping(PoolId poolId => uint256) public totalShares;
     mapping(PoolId poolId => mapping(address user => uint256)) public sharesOf;
 
+    /// @dev This pool's own token holdings, tracked by the hook itself rather than read from
+    ///      `poolManager.balanceOf(address(this), currency.toId())`. That claim balance is keyed
+    ///      globally by currency, not by PoolId, so it's shared across every pool this hook backs
+    ///      that uses the same currency — and it's mintable to this hook by *any* address via
+    ///      `poolManager.mint(address(this), id, amount)` after settling real tokens, with no
+    ///      relation to this pool's own addLiquidity/removeLiquidity/swap history. Both make the
+    ///      raw claim balance untrustworthy as the mint/burn value formula's reserve — a donation
+    ///      or a sibling pool sharing a currency would silently reprice everyone's shares. These
+    ///      mappings instead move only in response to this pool's own operations (see
+    ///      `_getAmountIn`, `_getAmountOut`, `_swapExactIn`, `collectFees`), so they can't be
+    ///      inflated or contaminated from outside this pool.
+    mapping(PoolId poolId => uint256) public poolReserve0;
+    mapping(PoolId poolId => uint256) public poolReserve1;
+
     mapping(PoolId poolId => BinLayout.Book) public books;
     mapping(PoolId poolId => mapping(int24 binIndex => uint128)) public liquidity;
 
@@ -160,18 +174,15 @@ contract BinBook is BaseCustomCurve {
         (amount0, amount1) =
             _depositLBase(id, window, lBase, refBins, params.amount0Desired, params.amount1Desired, msg.sender);
 
-        // Read after depositLBase (bookkeeping-only, no settlement — that happens later in
-        // _modifyLiquidity), so these are still the pool's reserves as of "right now", the same
-        // instant priced below.
+        // poolReserve0/1 still reflect the pool's state from *before* this deposit (they're only
+        // bumped below, after pricing), so this is the same instant priced below.
         shares = SwapMath.getMintShares(
-            amount0,
-            amount1,
-            poolManager.balanceOf(address(this), key.currency0.toId()),
-            poolManager.balanceOf(address(this), key.currency1.toId()),
-            books[id].sqrtPriceX96,
-            totalShares[id]
+            amount0, amount1, poolReserve0[id], poolReserve1[id], books[id].sqrtPriceX96, totalShares[id]
         );
         if (shares == 0) revert ZeroAmounts();
+
+        poolReserve0[id] += amount0;
+        poolReserve1[id] += amount1;
     }
 
     function _getAmountOut(PoolKey memory key, RemoveLiquidityParams memory params)
@@ -197,15 +208,16 @@ contract BinBook is BaseCustomCurve {
         // totalSupply — the pool-wide total shares outstanding, NOT this caller's own share
         // balance (using userShares here would let anyone burning 100% of their own shares walk
         // away with the value of the ENTIRE pool whenever they aren't the sole LP). reserve0/
-        // reserve1 and the live price give the *same* token0-equivalent value formula
+        // reserve1 (this pool's own tracked reserves, not the PoolManager's global claim balance —
+        // see poolReserve0/1) and the live price give the *same* token0-equivalent value formula
         // addLiquidity's share minting uses (SwapMath.valueOf), so `shares` worth of value is
         // pinned down before any bin is touched. The range walk below then drains only the
         // caller's chosen bins until that value is redeemed, and reverts rather than
         // over/under-paying if the range can't cover it — this is what keeps a caller from
         // cherry-picking favorably-priced bins to redeem shares at more than their fair value, at
         // other LPs' expense.
-        uint256 reserve0 = poolManager.balanceOf(address(this), key.currency0.toId());
-        uint256 reserve1 = poolManager.balanceOf(address(this), key.currency1.toId());
+        uint256 reserve0 = poolReserve0[id];
+        uint256 reserve1 = poolReserve1[id];
         uint256 targetValue =
             FullMath.mulDiv(SwapMath.valueOf(reserve0, reserve1, book.sqrtPriceX96), shares, totalShares[id]);
 
@@ -214,11 +226,14 @@ contract BinBook is BaseCustomCurve {
         // tokenAmountsForBin recomputes token0/token1 fresh from L, while depositLBase derived
         // the amounts originally taken in by proportionally scaling a shared per-bin reference
         // (so a multi-bin deposit's total never drifts over its budget under floor rounding) —
-        // the two paths can disagree by a few wei per bin. Clamp to the pool's actual claim
-        // balance (read before the walk above; nothing external can move it in between) so that
-        // drift can never make a withdrawal try to pull out more than the hook holds.
+        // the two paths can disagree by a few wei per bin. Clamp to this pool's own tracked
+        // reserve (read before the walk above; nothing external can move it in between) so that
+        // drift can never make a withdrawal try to pull out more than the pool is tracked to hold.
         if (amount0 > reserve0) amount0 = reserve0;
         if (amount1 > reserve1) amount1 = reserve1;
+
+        poolReserve0[id] = reserve0 - amount0;
+        poolReserve1[id] = reserve1 - amount1;
     }
 
     function _getUnspecifiedAmount(PoolKey calldata key, SwapParams calldata params)
@@ -322,6 +337,9 @@ contract BinBook is BaseCustomCurve {
         }
 
         if (amount0 == 0 && amount1 == 0) return (0, 0);
+
+        poolReserve0[id] -= amount0;
+        poolReserve1[id] -= amount1;
 
         poolManager.unlock(
             abi.encode(
@@ -443,6 +461,17 @@ contract BinBook is BaseCustomCurve {
         _lastSwapFee[id] = w.feeTotal;
         _commitSwap(id, w.sqrtEnd, w.endIndex);
         amountOut = w.amountOut;
+
+        // Mirror the swap's net token flow into this pool's own tracked reserves: the trader's
+        // full `amountIn` (principal + fee — w.remaining hit 0, so all of it landed in the pool)
+        // came in on one side, `amountOut` left on the other.
+        if (zeroForOne) {
+            poolReserve0[id] += amountIn;
+            poolReserve1[id] -= amountOut;
+        } else {
+            poolReserve1[id] += amountIn;
+            poolReserve0[id] -= amountOut;
+        }
     }
 
     /// @dev Box computeSwapStep's tuple into one memory slot (stack-too-deep hygiene).
