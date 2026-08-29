@@ -5,7 +5,6 @@ import {
   encodeAbiParameters,
   formatUnits,
   keccak256,
-  maxUint256,
   parseUnits,
   type Address,
 } from "viem";
@@ -17,6 +16,8 @@ import {
   useWriteContract,
 } from "wagmi";
 import { useDeployment } from "@/hooks/useDeployment";
+import { AllowancePrompt } from "@/components/AllowancePrompt";
+import { AllowancesModal } from "@/components/AllowancesModal";
 import { TokenSelect } from "@/components/TokenSelect";
 import { TxModal, type TxStatus, type TxStep } from "@/components/TxModal";
 import { formatPriceHuman } from "@/lib/priceMath";
@@ -377,6 +378,9 @@ export function SwapForm() {
   const [txError, setTxError] = useState<string | null>(null);
   const [txSteps, setTxSteps] = useState<TxStep[]>([]);
 
+  const [allowancePromptOpen, setAllowancePromptOpen] = useState(false);
+  const [allowancesModalOpen, setAllowancesModalOpen] = useState(false);
+
   const needsApproval = erc20ToRouter < amountInRaw;
 
   useEffect(() => {
@@ -387,20 +391,6 @@ export function SwapForm() {
     metaQ.refetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSuccess]);
-
-  async function ensureApproval(): Promise<void> {
-    if (!deployment || !payToken) return;
-    // router04 pulls input tokens via ERC20 transferFrom: approve router directly
-    if (erc20ToRouter < amountInRaw) {
-      await writeContractAsync({
-        address: payToken,
-        abi: erc20MetaAbi,
-        functionName: "approve",
-        args: [deployment.swapRouter, maxUint256],
-      });
-      await allowQ.refetch();
-    }
-  }
 
   function flip() {
     setInAddr(outAddr);
@@ -432,8 +422,18 @@ export function SwapForm() {
     return "Swap";
   }, [isConnected, isPending, confirming, amountIn, inAddr, outAddr, quoteErrorText, noPool]);
 
-  async function onSubmit(e: FormEvent) {
+  function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (!deployment || !key || !address || amountInRaw === 0n || inAddr === outAddr) return;
+    if (needsApproval) {
+      // let the user choose unlimited vs. this-swap-only before anything is signed
+      setAllowancePromptOpen(true);
+      return;
+    }
+    runSwap();
+  }
+
+  async function runSwap(approveAmount?: bigint): Promise<void> {
     if (!deployment || !key || !address || amountInRaw === 0n || inAddr === outAddr) return;
     setStatus(null);
     setSwapError(null);
@@ -442,13 +442,21 @@ export function SwapForm() {
     setTxModalStatus("pending");
     setTxHash(null);
 
+    const doApprove = approveAmount !== undefined;
     const approvalStep: TxStep = { label: `Approve ${paySymbol}`, done: false };
     const swapStep: TxStep = { label: `Swap ${paySymbol} → ${recvSymbol}`, done: false };
-    setTxSteps(needsApproval ? [approvalStep, swapStep] : [swapStep]);
+    setTxSteps(doApprove ? [approvalStep, swapStep] : [swapStep]);
 
     try {
-      if (needsApproval) {
-        await ensureApproval();
+      if (doApprove && payToken) {
+        // router04 pulls input tokens via ERC20 transferFrom: approve router directly
+        await writeContractAsync({
+          address: payToken,
+          abi: erc20MetaAbi,
+          functionName: "approve",
+          args: [deployment.swapRouter, approveAmount],
+        });
+        await allowQ.refetch();
         setTxSteps((prev) => prev.map((s, i) => (i === 0 ? { ...s, done: true } : s)));
       }
       const hash = await writeContractAsync({
@@ -640,6 +648,14 @@ export function SwapForm() {
         {ctaLabel}
       </button>
 
+      <button
+        type="button"
+        className="allowance-manage-link"
+        onClick={() => setAllowancesModalOpen(true)}
+      >
+        Manage token allowances
+      </button>
+
       {noPool && (
         <p className="status warn">
           No {paySymbol}/{recvSymbol} pool exists on-chain yet — create one first.
@@ -672,6 +688,20 @@ export function SwapForm() {
         summary={txSummary}
         steps={txSteps}
       />
+
+      <AllowancePrompt
+        open={allowancePromptOpen}
+        onClose={() => setAllowancePromptOpen(false)}
+        onConfirm={(approveAmount) => {
+          setAllowancePromptOpen(false);
+          runSwap(approveAmount);
+        }}
+        symbol={paySymbol}
+        decimals={payDecimals}
+        tradeAmount={amountIn}
+      />
+
+      <AllowancesModal open={allowancesModalOpen} onClose={() => setAllowancesModalOpen(false)} />
     </form>
   );
 }

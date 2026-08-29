@@ -1727,6 +1727,292 @@ input {
   white-space: nowrap;
 }
 
+/* ── Allowance prompt & manage-allowances modal ─────────── */
+.allowance-modal,
+.allowances-modal {
+  text-align: left;
+}
+
+.allowance-title {
+  margin: 0 0 0.4rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.allowance-sub {
+  margin: 0 0 1.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.allowance-sub b,
+.info-body b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.segmented {
+  display: flex;
+  gap: 0.5rem;
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem;
+  margin-bottom: 1rem;
+}
+
+.seg-btn {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.83rem;
+  padding: 0.6rem 0.5rem;
+  border-radius: calc(var(--radius-sm) - 0.25rem);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.seg-btn.active {
+  background: color-mix(in oklab, var(--accent) 16%, var(--bg-elevated));
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 45%, transparent);
+}
+
+.seg-btn small {
+  font-weight: 400;
+  font-size: 0.7rem;
+  color: var(--muted-2);
+}
+
+.seg-btn.active small {
+  color: color-mix(in oklab, var(--accent) 70%, var(--muted));
+}
+
+.amount-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.8rem 0.9rem;
+  margin-bottom: 0.6rem;
+}
+
+.amount-row input {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 1rem;
+  font-weight: 500;
+  width: 100%;
+  outline: none;
+}
+
+.amount-row .unit {
+  font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+  padding-left: 0.75rem;
+}
+
+.allowance-warn {
+  margin: -0.2rem 0 0.8rem;
+  color: var(--danger);
+  font-size: 0.78rem;
+}
+
+.info-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin-bottom: 1.2rem;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--bg-input) 70%, transparent);
+}
+
+.info-head {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem 0.85rem;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.info-head::-webkit-details-marker {
+  display: none;
+}
+
+.info-row[open] .info-head {
+  border-bottom: 1px solid var(--line);
+}
+
+.info-head svg {
+  flex-shrink: 0;
+  color: var(--muted-2);
+}
+
+.info-head .chev {
+  margin-left: auto;
+  transition: transform 0.15s ease;
+  color: var(--muted-2);
+  display: flex;
+}
+
+.info-row[open] .info-head .chev {
+  transform: rotate(180deg);
+}
+
+.info-body {
+  padding: 0 0.85rem 0.85rem 2.3rem;
+  color: var(--muted-2);
+  font-size: 0.79rem;
+  line-height: 1.55;
+}
+
+.allowance-manage-link {
+  display: block;
+  width: 100%;
+  margin-top: 0.6rem;
+  background: transparent;
+  border: 0;
+  color: var(--muted-2);
+  font-size: 0.78rem;
+  text-align: center;
+  cursor: pointer;
+}
+
+.allowance-manage-link:hover {
+  color: var(--muted);
+}
+
+.allow-list {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin-bottom: 0.8rem;
+}
+
+.allow-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.8rem 0.1rem;
+}
+
+.allow-row + .allow-row {
+  border-top: 1px solid var(--line);
+}
+
+.tok-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.tok-info {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.tok-symbol {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+.tok-spender {
+  font-size: 0.74rem;
+  color: var(--muted-2);
+  margin-top: 0.1rem;
+}
+
+.status-pill {
+  font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.status-pill.unlimited {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+.status-pill.exact {
+  color: var(--ink);
+  background: var(--bg-input);
+  border: 1px solid var(--line-strong);
+}
+
+.revoke-btn {
+  border: 1px solid var(--line-strong);
+  background: var(--bg-input);
+  color: var(--muted);
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.76rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  margin-left: 0.5rem;
+  flex-shrink: 0;
+}
+
+.revoke-btn:hover {
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 45%, var(--line-strong));
+}
+
+.spin-wrap {
+  width: 52px;
+  display: flex;
+  justify-content: flex-end;
+  margin-left: 0.5rem;
+}
+
+.allow-list .spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in oklab, var(--danger) 30%, transparent);
+  border-top-color: var(--danger);
+  animation: tx-spin 0.7s linear infinite;
+}
+
+.allowance-foot-note {
+  margin: 0;
+  color: var(--muted-2);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
 /* ── Portfolio / positions ──────────────────────────────── */
 .portfolio-wrap {
   max-width: 980px;
