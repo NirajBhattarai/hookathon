@@ -71,6 +71,41 @@ flowchart TB
   price snapshot — bounding a withdrawal's cost to the range requested, not everything the caller
   has ever touched in that pool.
 
+## Performance: why bins beat x·y=k for a meme launch
+
+A meme-coin launch pool is thin, one-sided at first, and the first target for sandwich bots. To
+check whether the bin+linear-decay design actually helps, `test/BinBook.sandwich.t.sol` runs the
+same sandwich (attacker front-runs 2x the victim's size, victim trades, attacker back-runs) against
+two pools seeded with **identical TVL and fee** — one a plain constant-product (x·y=k) curve, one
+BinBook's bin book — and measures the attacker's ROI on both.
+
+For a meme-shaped pool (30bps fee, ~3%-wide bins), sweeping the victim's trade size from 0.5% to
+10% of pool TVL:
+
+| Trade size (% of TVL) | x·y=k attacker ROI | BinBook attacker ROI | Sandwich profit cut |
+|---|---|---|---|
+| 0.5% | 1.34% | **loss** (-0.44%) | 100% |
+| 1% | 3.19% | **loss** (-0.29%) | 100% |
+| 2% | 6.61% | 0.02% | 99.7% |
+| 3% | 9.72% | 0.32% | 96.7% |
+| 5% | 15.08% | 0.97% | 93.5% |
+| 10% | 24.81% | 2.78% | 88.8% |
+
+*(`forge test --match-test test_sandwich_meme_sweep -vv` reproduces this; "profit cut" is
+`1 - binROI/xykROI`, clamped to 100% when the bin attack is outright unprofitable.)*
+
+Below ~2% of TVL — the range most retail buys and most bot front-runs actually fall in — sandwiching
+BinBook is **unprofitable outright**, not just less profitable. The same pattern holds (bins beat
+x·y=k) at stable-pair and mid-volatility fee/bin configurations too
+(`test_sandwich_stable_binsBeatXyk`, `test_sandwich_mid_binsBeatXyk`).
+
+**Why:** the linear-decay ramp concentrates depth in a shallow slice of bins right at the active
+price rather than spreading it across the whole curve. An attacker's front-run of a given size
+walks through much less depth before hitting the ramp's edge, so it moves price — and burns fee —
+disproportionately more than the same-sized trade would on a flat x·y=k curve. That extra price
+impact and fee drag on the *attacker's own* front-run is what eats their margin before the
+back-run ever happens.
+
 ## Getting started
 
 ```bash
