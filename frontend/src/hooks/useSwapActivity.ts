@@ -1,8 +1,8 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { usePublicClient } from "wagmi";
 import { fetchSwapLogs, type SwapEvent } from "@/lib/activity";
+import { useAppPublicClient } from "./useAppPublicClient";
 import { useDeployment } from "./useDeployment";
 import { usePool } from "./usePool";
 
@@ -19,7 +19,7 @@ const BLOCK_WINDOW: Record<Timeframe, bigint> = {
 export function useSwapActivity(timeframe: Timeframe) {
   const { deployment, ready } = useDeployment();
   const { poolId } = usePool();
-  const client = usePublicClient({ chainId: deployment?.chainId });
+  const client = useAppPublicClient(deployment);
 
   const enabled = ready && !!deployment && !!poolId && !!client;
 

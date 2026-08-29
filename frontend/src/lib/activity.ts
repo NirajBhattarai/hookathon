@@ -23,7 +23,8 @@ export type SwapEvent = {
 };
 
 const CHUNK_BLOCKS = 2000n;
-const CONCURRENCY = 5;
+const CONCURRENCY = 2;
+const MAX_RETRIES = 4;
 
 function callGetLogs(
   client: PublicClient,
@@ -43,6 +44,17 @@ function callGetLogs(
 
 type SwapLog = Awaited<ReturnType<typeof callGetLogs>>[number];
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retries the same range with exponential backoff first (handles transient/rate-limit errors —
+ * e.g. a free-tier RPC's 429 — without amplifying them), then falls back to bisecting the range
+ * once retries are exhausted (handles a genuine "range too large" RPC error). Bisecting on every
+ * error unconditionally, as a naive implementation does, turns one rate-limited call into an
+ * exponentially growing storm of further-rate-limited sub-calls.
+ */
 async function getLogsChunk(
   client: PublicClient,
   poolManager: Address,
@@ -50,18 +62,25 @@ async function getLogsChunk(
   fromBlock: bigint,
   toBlock: bigint
 ): Promise<SwapLog[]> {
-  try {
-    return await callGetLogs(client, poolManager, poolId, fromBlock, toBlock);
-  } catch (err) {
-    // RPC "block range too large" (or similar) — split once and retry.
-    const mid = fromBlock + (toBlock - fromBlock) / 2n;
-    if (mid <= fromBlock) throw err;
-    const [a, b] = await Promise.all([
-      getLogsChunk(client, poolManager, poolId, fromBlock, mid),
-      getLogsChunk(client, poolManager, poolId, mid + 1n, toBlock),
-    ]);
-    return [...a, ...b];
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await callGetLogs(client, poolManager, poolId, fromBlock, toBlock);
+    } catch (err) {
+      if (attempt < MAX_RETRIES) {
+        await sleep(300 * 2 ** attempt + Math.random() * 200);
+        continue;
+      }
+      const mid = fromBlock + (toBlock - fromBlock) / 2n;
+      if (mid <= fromBlock) throw err;
+      const [a, b] = await Promise.all([
+        getLogsChunk(client, poolManager, poolId, fromBlock, mid),
+        getLogsChunk(client, poolManager, poolId, mid + 1n, toBlock),
+      ]);
+      return [...a, ...b];
+    }
   }
+  /* istanbul ignore next — loop always returns or throws */
+  throw new Error("unreachable");
 }
 
 /** Fetch + decode every Swap log for `poolId` in [fromBlock, toBlock], oldest first. */

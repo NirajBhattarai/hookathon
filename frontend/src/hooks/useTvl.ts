@@ -16,9 +16,10 @@ function toId(token: Address): bigint {
 /**
  * TVL for the active pool. BinBook custodies reserves as ERC-6909 claim balances inside
  * PoolManager (not raw ERC20 balances on itself), so this reads poolManager.balanceOf(binBook, id)
- * for both currencies of the pool and prices them at the latest trade price.
+ * for both currencies of the pool and prices them at the given quote price (typically the
+ * pool's current spot price).
  */
-export function useTvl(lastPrice: number | null) {
+export function useTvl(price: number | null) {
   const { deployment, ready } = useDeployment();
   const { key } = usePool();
   const dec0 = useTokenMeta(key?.currency0).decimals;
@@ -54,7 +55,7 @@ export function useTvl(lastPrice: number | null) {
     }
     const amt0 = Number(formatUnits(r0, dec0));
     const amt1 = Number(formatUnits(r1, dec1));
-    const tvlInQuote = lastPrice != null ? amt0 * lastPrice + amt1 : null;
+    const tvlInQuote = price != null ? amt0 * price + amt1 : null;
     return { reserve0: r0, reserve1: r1, tvlInQuote };
-  }, [q.data, dec0, dec1, lastPrice]);
+  }, [q.data, dec0, dec1, price]);
 }

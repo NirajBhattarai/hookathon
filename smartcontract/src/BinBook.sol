@@ -20,42 +20,11 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
 
 import {SwapMath} from "./libraries/SwapMath.sol";
+import {BinLayout} from "./libraries/BinLayout.sol";
 
 /*//////////////////////////////////////////////////////////////
-                                 TYPES
+                                  TYPES
 //////////////////////////////////////////////////////////////*/
-
-struct Book {
-    int24 binSize;
-    uint16 ramp;
-    uint16 numBinsPerSide;
-    int24 currentBin;
-    int24 minBin;
-    int24 maxBin;
-    uint160 sqrtPriceX96;
-    bool seeded;
-}
-
-struct Position {
-    uint128 liquidity;
-    uint256 feeGrowth0LastX128;
-    uint256 feeGrowth1LastX128;
-    uint256 tokensOwed0;
-    uint256 tokensOwed1;
-}
-
-struct UserRange {
-    int24 minB;
-    int24 maxB;
-    bool set;
-}
-
-struct BinWindow {
-    int24 minB;
-    int24 maxB;
-    int24 cur;
-    uint256 ramp;
-}
 
 /// @dev Running totals for one swap across the book.
 struct WalkCtx {
@@ -73,6 +42,7 @@ contract BinBook is BaseCustomCurve {
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
     using StateLibrary for IPoolManager;
+    using BinLayout for BinLayout.Book;
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
@@ -80,10 +50,9 @@ contract BinBook is BaseCustomCurve {
 
     uint16 public constant DEFAULT_RAMP = 10;
     uint16 public constant DEFAULT_BINS_PER_SIDE = 10;
-    /// @dev Cap on bins filled in a single add. Far ranges should use a larger `binSize`.
-    uint16 public constant MAX_BINS_PER_ADD = 256;
     /// @dev Cap on the contiguous book. Swaps load every bin in `[minBin, maxBin]`.
-    uint16 public constant MAX_BOOK_BINS = 1024;
+    ///      Re-exported from `BinLayout` (single source of truth) to keep the public getter.
+    uint16 public constant MAX_BOOK_BINS = BinLayout.MAX_BOOK_BINS;
 
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
@@ -93,15 +62,15 @@ contract BinBook is BaseCustomCurve {
     mapping(PoolId poolId => uint256) public totalShares;
     mapping(PoolId poolId => mapping(address user => uint256)) public sharesOf;
 
-    mapping(PoolId poolId => Book) public books;
+    mapping(PoolId poolId => BinLayout.Book) public books;
     mapping(PoolId poolId => mapping(int24 binIndex => uint128)) public liquidity;
 
     /// @dev Uniswap-style fee growth (token0 / token1) per unit L in a bin.
     mapping(PoolId poolId => mapping(int24 binIndex => uint256)) public feeGrowth0X128;
     mapping(PoolId poolId => mapping(int24 binIndex => uint256)) public feeGrowth1X128;
 
-    mapping(PoolId poolId => mapping(address user => mapping(int24 binIndex => Position))) public positions;
-    mapping(PoolId poolId => mapping(address user => UserRange)) public userRanges;
+    mapping(PoolId poolId => mapping(address user => mapping(int24 binIndex => BinLayout.Position))) public positions;
+    mapping(PoolId poolId => mapping(address user => BinLayout.UserRange)) public userRanges;
 
     mapping(PoolId poolId => uint256) private _lastSwapFee;
 
@@ -123,13 +92,10 @@ contract BinBook is BaseCustomCurve {
     error InvalidBinSize();
     error ExactOutputNotSupported();
     error ZeroAmounts();
-    error TicksNotAlignedToBins();
-    error InvalidTickRange();
-    error TooManyBins();
-    error BookTooWide();
     error InsufficientShares();
     error InitializeViaCreatePool();
     error InvalidHook();
+    error InsufficientRangeLiquidity();
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -185,10 +151,26 @@ contract BinBook is BaseCustomCurve {
         PoolId id = key.toId();
         if (params.amount0Desired == 0 && params.amount1Desired == 0) revert ZeroAmounts();
 
-        BinWindow memory w = _windowFor(id, params.tickLower, params.tickUpper);
-        uint256 LBase = _previewLBase(id, w, params.amount0Desired, params.amount1Desired);
-        (amount0, amount1) = _applyLBase(id, w, LBase, params.amount0Desired, params.amount1Desired, msg.sender);
-        shares = amount0 + amount1;
+        BinLayout.Window memory window = books[id].resolveWindow(params.tickLower, params.tickUpper);
+
+        (uint256 lBase, BinLayout.ReferenceBin[] memory refBins) =
+            books[id].solveLBase(window, params.amount0Desired, params.amount1Desired);
+        if (lBase == 0) revert ZeroAmounts();
+
+        (amount0, amount1) =
+            _depositLBase(id, window, lBase, refBins, params.amount0Desired, params.amount1Desired, msg.sender);
+
+        // Read after depositLBase (bookkeeping-only, no settlement — that happens later in
+        // _modifyLiquidity), so these are still the pool's reserves as of "right now", the same
+        // instant priced below.
+        shares = SwapMath.getMintShares(
+            amount0,
+            amount1,
+            poolManager.balanceOf(address(this), key.currency0.toId()),
+            poolManager.balanceOf(address(this), key.currency1.toId()),
+            books[id].sqrtPriceX96,
+            totalShares[id]
+        );
         if (shares == 0) revert ZeroAmounts();
     }
 
@@ -203,13 +185,40 @@ contract BinBook is BaseCustomCurve {
         shares = params.liquidity;
         if (shares == 0 || shares > userShares) revert InsufficientShares();
 
-        uint256 supply = totalShares[id];
-        // currency.toId() is preferred; unwrap works for ERC20 address ids used by PoolManager claims
-        uint256 claim0 = poolManager.balanceOf(address(this), key.currency0.toId());
-        uint256 claim1 = poolManager.balanceOf(address(this), key.currency1.toId());
-        (amount0, amount1) = SwapMath.getWithdrawAmounts(claim0, claim1, shares, supply);
+        // Scope the redemption to the caller's chosen [tickLower, tickUpper] instead of walking
+        // this user's entire historical bin range (userRanges only ever widens — see
+        // BinLayout.increaseUserL — so that range can grow far beyond what's actually being
+        // withdrawn here, making removeLiquidity's cost scale with a stale span rather than the
+        // request). Validate/convert the same way addLiquidity does.
+        BinLayout.Book storage book = books[id];
+        (int24 minB, int24 maxB) = book.resolveBinRange(params.tickLower, params.tickUpper);
 
-        _unwindUserL(id, msg.sender, shares, userShares);
+        // Value target, computed as the exact inverse of getMintShares: shares * totalValueBefore /
+        // totalSupply — the pool-wide total shares outstanding, NOT this caller's own share
+        // balance (using userShares here would let anyone burning 100% of their own shares walk
+        // away with the value of the ENTIRE pool whenever they aren't the sole LP). reserve0/
+        // reserve1 and the live price give the *same* token0-equivalent value formula
+        // addLiquidity's share minting uses (SwapMath.valueOf), so `shares` worth of value is
+        // pinned down before any bin is touched. The range walk below then drains only the
+        // caller's chosen bins until that value is redeemed, and reverts rather than
+        // over/under-paying if the range can't cover it — this is what keeps a caller from
+        // cherry-picking favorably-priced bins to redeem shares at more than their fair value, at
+        // other LPs' expense.
+        uint256 reserve0 = poolManager.balanceOf(address(this), key.currency0.toId());
+        uint256 reserve1 = poolManager.balanceOf(address(this), key.currency1.toId());
+        uint256 targetValue =
+            FullMath.mulDiv(SwapMath.valueOf(reserve0, reserve1, book.sqrtPriceX96), shares, totalShares[id]);
+
+        (amount0, amount1) = _decreaseUserLInRange(id, msg.sender, minB, maxB, targetValue);
+
+        // tokenAmountsForBin recomputes token0/token1 fresh from L, while depositLBase derived
+        // the amounts originally taken in by proportionally scaling a shared per-bin reference
+        // (so a multi-bin deposit's total never drifts over its budget under floor rounding) —
+        // the two paths can disagree by a few wei per bin. Clamp to the pool's actual claim
+        // balance (read before the walk above; nothing external can move it in between) so that
+        // drift can never make a withdrawal try to pull out more than the hook holds.
+        if (amount0 > reserve0) amount0 = reserve0;
+        if (amount1 > reserve1) amount1 = reserve1;
     }
 
     function _getUnspecifiedAmount(PoolKey calldata key, SwapParams calldata params)
@@ -277,9 +286,9 @@ contract BinBook is BaseCustomCurve {
         initializedPools[id] = true;
         poolCreator[id] = msg.sender;
 
-        books[id] = Book({
+        books[id] = BinLayout.Book({
             binSize: _binSize,
-            ramp: DEFAULT_RAMP,
+            baseRamp: DEFAULT_RAMP,
             numBinsPerSide: DEFAULT_BINS_PER_SIDE,
             currentBin: 0,
             minBin: 0,
@@ -299,13 +308,13 @@ contract BinBook is BaseCustomCurve {
     /// @notice Realize and pay accrued swap fees for `msg.sender` across their bins in `key`.
     function collectFees(PoolKey calldata key) external returns (uint256 amount0, uint256 amount1) {
         PoolId id = key.toId();
-        UserRange memory r = userRanges[id][msg.sender];
+        BinLayout.UserRange memory r = userRanges[id][msg.sender];
         if (!r.set) return (0, 0);
 
         for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
-            Position storage p = positions[id][msg.sender][idx];
+            BinLayout.Position storage p = positions[id][msg.sender][idx];
             if (p.liquidity == 0 && p.tokensOwed0 == 0 && p.tokensOwed1 == 0) continue;
-            _realizeFees(id, msg.sender, idx);
+            BinLayout.settleFees(p, feeGrowth0X128[id], feeGrowth1X128[id], idx);
             amount0 += p.tokensOwed0;
             amount1 += p.tokensOwed1;
             p.tokensOwed0 = 0;
@@ -364,10 +373,10 @@ contract BinBook is BaseCustomCurve {
     }
 
     function pendingFees(PoolId id, address user) public view returns (uint256 amount0, uint256 amount1) {
-        UserRange memory r = userRanges[id][user];
+        BinLayout.UserRange memory r = userRanges[id][user];
         if (!r.set) return (0, 0);
         for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
-            Position storage p = positions[id][user][idx];
+            BinLayout.Position storage p = positions[id][user][idx];
             amount0 += p.tokensOwed0;
             amount1 += p.tokensOwed1;
             uint256 L = p.liquidity;
@@ -389,7 +398,7 @@ contract BinBook is BaseCustomCurve {
         returns (uint256 amountOut)
     {
         PoolId id = key.toId();
-        Book storage b = books[id];
+        BinLayout.Book storage b = books[id];
 
         (SwapMath.Bin[] memory bins, uint256 active) = _loadBins(id);
         if (bins.length == 0) revert SwapMath.InsufficientLiquidity();
@@ -401,13 +410,13 @@ contract BinBook is BaseCustomCurve {
 
         if (zeroForOne) {
             for (uint256 i = active;;) {
-                SwapMath.CoreStep memory c = _coreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, true);
+                SwapMath.CoreStep memory c = _computeCoreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, true);
                 w.remaining -= c.amountIn + c.feeAmount;
                 w.amountOut += c.amountOut;
                 w.feeTotal += c.feeAmount;
                 w.sqrtEnd = c.sqrtNext;
                 w.endIndex = i;
-                _creditFee(id, b.minBin + int24(int256(i)), c.feeAmount, true);
+                _accrueFee(id, b.minBin + int24(int256(i)), c.feeAmount, true);
                 if (w.remaining == 0 || i == 0) break;
                 unchecked {
                     --i;
@@ -416,13 +425,13 @@ contract BinBook is BaseCustomCurve {
         } else {
             uint256 last = bins.length - 1;
             for (uint256 i = active; i <= last;) {
-                SwapMath.CoreStep memory c = _coreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, false);
+                SwapMath.CoreStep memory c = _computeCoreStep(bins[i], w.sqrtEnd, w.remaining, key.fee, false);
                 w.remaining -= c.amountIn + c.feeAmount;
                 w.amountOut += c.amountOut;
                 w.feeTotal += c.feeAmount;
                 w.sqrtEnd = c.sqrtNext;
                 w.endIndex = i;
-                _creditFee(id, b.minBin + int24(int256(i)), c.feeAmount, false);
+                _accrueFee(id, b.minBin + int24(int256(i)), c.feeAmount, false);
                 if (w.remaining == 0 || i == last) break;
                 unchecked {
                     ++i;
@@ -437,128 +446,107 @@ contract BinBook is BaseCustomCurve {
     }
 
     /// @dev Box computeSwapStep's tuple into one memory slot (stack-too-deep hygiene).
-    function _coreStep(SwapMath.Bin memory bin, uint160 sqrtP, uint256 remaining, uint24 feePips, bool zeroForOne)
-        private
-        pure
-        returns (SwapMath.CoreStep memory c)
-    {
+    function _computeCoreStep(
+        SwapMath.Bin memory bin,
+        uint160 sqrtP,
+        uint256 remaining,
+        uint24 feePips,
+        bool zeroForOne
+    ) private pure returns (SwapMath.CoreStep memory c) {
         (c.sqrtNext, c.amountIn, c.amountOut, c.feeAmount) =
             SwapMath.computeSwapStep(bin, sqrtP, -int256(remaining), feePips, zeroForOne);
     }
 
     function _commitSwap(PoolId id, uint160 sqrtEnd, uint256 endIndex) internal {
-        Book storage b = books[id];
+        BinLayout.Book storage b = books[id];
         b.sqrtPriceX96 = sqrtEnd;
         b.currentBin = b.minBin + int24(int256(endIndex));
     }
 
-    /// @dev Reduce the caller's bin L proportional to shares burned / their total shares.
-    function _unwindUserL(PoolId id, address user, uint256 sharesBurned, uint256 userShares) internal {
-        UserRange memory r = userRanges[id][user];
-        if (!r.set || userShares == 0) return;
+    /// @dev Burns a single, uniform fraction (`targetValue / rangeValue`) of the caller's L from
+    ///      every bin in `[minB, maxB]`, returning the token0/token1 that L actually backs — this
+    ///      user's own position within the requested range, not a slice of the pool's aggregate
+    ///      reserves. Two passes rather than an order-dependent running-total walk: measuring the
+    ///      range's total value first (pass 1) before burning anything means the fraction applied
+    ///      is the same for every bin, so it can never exceed `targetValue` in aggregate (capping
+    ///      what a caller can extract regardless of which bins they point at — see
+    ///      `_getAmountOut`'s value-target comment) and any cross-path rounding drift (see
+    ///      `tokenAmountsForBin` vs `depositLBase`) lands as a tiny uniform residue instead of
+    ///      concentrated in whichever bin a running-total walk happened to stop at. Reverts if the
+    ///      range doesn't hold enough value to cover the target at all.
+    function _decreaseUserLInRange(PoolId id, address user, int24 minB, int24 maxB, uint256 targetValue)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
+        if (targetValue == 0) return (0, 0);
 
-        for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
-            Position storage p = positions[id][user][idx];
+        BinLayout.Book storage book = books[id];
+
+        // Pass 1: settle fees and measure this range's total redeemable value at the current
+        // price. No liquidity is touched yet.
+        uint256 rangeValue;
+        for (int24 idx = minB; idx <= maxB; ++idx) {
+            BinLayout.Position storage p = positions[id][user][idx];
             uint256 L = p.liquidity;
             if (L == 0) continue;
-            _realizeFees(id, user, idx);
-            uint256 burnL = L * sharesBurned / userShares;
+            BinLayout.settleFees(p, feeGrowth0X128[id], feeGrowth1X128[id], idx);
+
+            (uint256 t0, uint256 t1) = book.tokenAmountsForBin(idx, L);
+            rangeValue += SwapMath.valueOf(t0, t1, book.sqrtPriceX96);
+        }
+
+        if (rangeValue < targetValue) revert InsufficientRangeLiquidity();
+
+        // Pass 2: burn targetValue/rangeValue (<= 1, guaranteed by the check above) of L from
+        // every bin. Floors, so aggregate redeemed value can only ever land at or under the
+        // target — the same rounding-direction convention as depositLBase's clamp.
+        uint256 fractionQ128 = FullMath.mulDiv(targetValue, FixedPoint128.Q128, rangeValue);
+        for (int24 idx = minB; idx <= maxB; ++idx) {
+            BinLayout.Position storage p = positions[id][user][idx];
+            uint256 L = p.liquidity;
+            if (L == 0) continue;
+
+            uint256 burnL = FullMath.mulDiv(L, fractionQ128, FixedPoint128.Q128);
             if (burnL == 0) continue;
             if (burnL > L) burnL = L;
+
+            (uint256 t0, uint256 t1) = book.tokenAmountsForBin(idx, burnL);
+            amount0 += t0;
+            amount1 += t1;
+
             p.liquidity = uint128(L - burnL);
             liquidity[id][idx] -= uint128(burnL);
-            p.feeGrowth0LastX128 = feeGrowth0X128[id][idx];
-            p.feeGrowth1LastX128 = feeGrowth1X128[id][idx];
         }
     }
 
-    function _previewLBase(PoolId id, BinWindow memory w, uint256 amount0Desired, uint256 amount1Desired)
-        internal
-        view
-        returns (uint256 LBase)
-    {
-        Book storage b = books[id];
-        uint256 need0;
-        uint256 need1;
-        uint256 probe = 1e18;
-        uint160 sqrtP = b.sqrtPriceX96;
-
-        for (int24 idx = w.minB; idx <= w.maxB; ++idx) {
-            uint256 Li = SwapMath.computeLPerBin(probe, w.ramp, _distance(idx, w.cur));
-            if (Li == 0) continue;
-            (uint256 t0, uint256 t1) = _amountsFor(id, idx, Li, sqrtP);
-            if (amount0Desired == 0 && t0 > 0) continue;
-            if (amount1Desired == 0 && t1 > 0) continue;
-            need0 += t0;
-            need1 += t1;
-        }
-
-        if (need0 == 0 && need1 == 0) revert SwapMath.InsufficientLiquidity();
-
-        uint256 s0 = need0 == 0 ? type(uint256).max : amount0Desired * probe / need0;
-        uint256 s1 = need1 == 0 ? type(uint256).max : amount1Desired * probe / need1;
-        LBase = s0 < s1 ? s0 : s1;
-        if (LBase == 0) revert ZeroAmounts();
-    }
-
-    function _applyLBase(
+    /// @dev Expands the book to cover the window (emitting `BookExpanded`), then delegates the
+    ///      funded-bin walk to `BinLayout.depositLBase`.
+    function _depositLBase(
         PoolId id,
-        BinWindow memory w,
-        uint256 LBase,
+        BinLayout.Window memory window,
+        uint256 lBase,
+        BinLayout.ReferenceBin[] memory refBins,
         uint256 amount0Desired,
         uint256 amount1Desired,
         address user
     ) internal returns (uint256 amount0, uint256 amount1) {
-        _expandBook(id, w.minB, w.maxB, w.cur);
-
-        uint160 sqrtP = books[id].sqrtPriceX96;
-        for (int24 idx = w.minB; idx <= w.maxB; ++idx) {
-            uint256 addL = SwapMath.computeLPerBin(LBase, w.ramp, _distance(idx, w.cur));
-            if (addL == 0) continue;
-            (uint256 t0, uint256 t1) = _amountsFor(id, idx, addL, sqrtP);
-            if (amount0Desired == 0 && t0 > 0) continue;
-            if (amount1Desired == 0 && t1 > 0) continue;
-            amount0 += t0;
-            amount1 += t1;
-            _creditUserL(id, user, idx, addL);
-        }
+        _expandBook(id, window.minB, window.maxB, window.cur);
+        (amount0, amount1) = BinLayout.depositLBase(
+            window.minB,
+            lBase,
+            refBins,
+            amount0Desired,
+            amount1Desired,
+            user,
+            liquidity[id],
+            feeGrowth0X128[id],
+            feeGrowth1X128[id],
+            positions[id],
+            userRanges[id]
+        );
     }
 
-    function _creditUserL(PoolId id, address user, int24 idx, uint256 addL) internal {
-        uint128 add128 = addL.toUint128();
-        _realizeFees(id, user, idx);
-        Position storage p = positions[id][user][idx];
-        p.liquidity += add128;
-        p.feeGrowth0LastX128 = feeGrowth0X128[id][idx];
-        p.feeGrowth1LastX128 = feeGrowth1X128[id][idx];
-        liquidity[id][idx] += add128;
-
-        UserRange storage r = userRanges[id][user];
-        if (!r.set) {
-            r.minB = idx;
-            r.maxB = idx;
-            r.set = true;
-        } else {
-            if (idx < r.minB) r.minB = idx;
-            if (idx > r.maxB) r.maxB = idx;
-        }
-    }
-
-    function _realizeFees(PoolId id, address user, int24 idx) internal {
-        Position storage p = positions[id][user][idx];
-        uint256 L = p.liquidity;
-        if (L == 0) {
-            p.feeGrowth0LastX128 = feeGrowth0X128[id][idx];
-            p.feeGrowth1LastX128 = feeGrowth1X128[id][idx];
-            return;
-        }
-        p.tokensOwed0 += FullMath.mulDiv(feeGrowth0X128[id][idx] - p.feeGrowth0LastX128, L, FixedPoint128.Q128);
-        p.tokensOwed1 += FullMath.mulDiv(feeGrowth1X128[id][idx] - p.feeGrowth1LastX128, L, FixedPoint128.Q128);
-        p.feeGrowth0LastX128 = feeGrowth0X128[id][idx];
-        p.feeGrowth1LastX128 = feeGrowth1X128[id][idx];
-    }
-
-    function _creditFee(PoolId id, int24 idx, uint256 fee, bool zeroForOne) internal {
+    function _accrueFee(PoolId id, int24 idx, uint256 fee, bool zeroForOne) internal {
         uint256 L = liquidity[id][idx];
         if (fee == 0 || L == 0) return;
         uint256 delta = FullMath.mulDiv(fee, FixedPoint128.Q128, L);
@@ -566,115 +554,19 @@ contract BinBook is BaseCustomCurve {
         else feeGrowth1X128[id][idx] += delta;
     }
 
-    /// @dev `tickLower >= tickUpper` (including 0,0) keeps the default near-spot window with the book's
-    ///      ramp. Custom ranges auto-floor the ramp at `farthestDistance + 1` so every bin gets funded.
-    function _windowFor(PoolId id, int24 tickLower, int24 tickUpper) internal view returns (BinWindow memory w) {
-        Book storage b = books[id];
-        (int24 defMin, int24 defMax, int24 cur) = _binRange(id);
-        w.cur = cur;
-
-        if (tickLower >= tickUpper) {
-            w.minB = defMin;
-            w.maxB = defMax;
-            w.ramp = b.ramp;
-            return w;
-        }
-
-        int24 size = b.binSize;
-        if (tickLower % size != 0 || tickUpper % size != 0) revert TicksNotAlignedToBins();
-        if (tickLower < TickMath.MIN_TICK || tickUpper > TickMath.MAX_TICK) revert InvalidTickRange();
-
-        int24 userMin = tickLower / size;
-        int24 userMax = tickUpper / size - 1;
-        if (userMax < userMin) revert InvalidTickRange();
-
-        uint256 n = uint256(int256(userMax - userMin + 1));
-        if (n > MAX_BINS_PER_ADD) revert TooManyBins();
-
-        w.minB = userMin;
-        w.maxB = userMax;
-        w.ramp = _rampFor(userMin, userMax, cur, b.ramp);
-    }
-
-    function _rampFor(int24 minB, int24 maxB, int24 cur, uint16 baseRamp) internal pure returns (uint256 ramp) {
-        uint256 dLo = _distance(minB, cur);
-        uint256 dHi = _distance(maxB, cur);
-        uint256 farthest = dLo > dHi ? dLo : dHi;
-        ramp = farthest + 1;
-        if (ramp < baseRamp) ramp = baseRamp;
-    }
-
     function _expandBook(PoolId id, int24 fillMin, int24 fillMax, int24 cur) internal {
-        Book storage b = books[id];
-        int24 minB = fillMin;
-        int24 maxB = fillMax;
-        if (cur < minB) minB = cur;
-        if (cur > maxB) maxB = cur;
-
-        if (!b.seeded) {
-            int24 n = int24(uint24(b.numBinsPerSide));
-            int24 defMin = cur - n;
-            int24 defMax = cur + n - 1;
-            if (defMin < minB) minB = defMin;
-            if (defMax > maxB) maxB = defMax;
-            b.currentBin = cur;
-            b.seeded = true;
-            b.minBin = minB;
-            b.maxBin = maxB;
-            emit BookExpanded(id, minB, maxB);
-        } else {
-            bool grew;
-            if (minB < b.minBin) {
-                b.minBin = minB;
-                grew = true;
-            }
-            if (maxB > b.maxBin) {
-                b.maxBin = maxB;
-                grew = true;
-            }
-            if (grew) emit BookExpanded(id, b.minBin, b.maxBin);
-        }
-
-        uint256 span = uint256(int256(b.maxBin - b.minBin + 1));
-        if (span > MAX_BOOK_BINS) revert BookTooWide();
+        (int24 minBin, int24 maxBin, bool expanded) = books[id].expandBook(fillMin, fillMax, cur);
+        if (expanded) emit BookExpanded(id, minBin, maxBin);
     }
 
-    function _binRange(PoolId id) internal view returns (int24 minB, int24 maxB, int24 cur) {
-        Book storage b = books[id];
-        if (b.seeded) {
-            return (b.minBin, b.maxBin, b.currentBin);
-        }
-        int24 tick = TickMath.getTickAtSqrtPrice(b.sqrtPriceX96);
-        cur = _floorDiv(tick, b.binSize);
-        int24 n = int24(uint24(b.numBinsPerSide));
-        minB = cur - n;
-        maxB = cur + n - 1;
-    }
-
-    function _distance(int24 binIndex, int24 cur) internal pure returns (uint256) {
-        if (binIndex < cur) return uint256(int256(cur - binIndex));
-        return uint256(int256(binIndex - cur + 1));
-    }
-
-    function _amountsFor(PoolId id, int24 binIndex, uint256 L, uint160 sqrtP)
-        internal
-        view
-        returns (uint256 token0, uint256 token1)
-    {
-        Book storage b = books[id];
-        int24 tickLo = _tickAtBin(id, binIndex);
-        uint160 sqrtLo = TickMath.getSqrtPriceAtTick(tickLo);
-        uint160 sqrtHi = TickMath.getSqrtPriceAtTick(tickLo + b.binSize);
-        return SwapMath.getTokenAmountsForBin(L, uint256(sqrtP), SwapMath.BinBounds(uint256(sqrtLo), uint256(sqrtHi)));
-    }
-
+    /// @dev Materializes the contiguous book as an ascending-price bin array for the swap walk.
     function _loadBins(PoolId id) internal view returns (SwapMath.Bin[] memory bins, uint256 active) {
-        Book storage b = books[id];
+        BinLayout.Book storage b = books[id];
         uint256 n = uint256(int256(b.maxBin - b.minBin + 1));
         bins = new SwapMath.Bin[](n);
         for (uint256 i = 0; i < n; ++i) {
             int24 idx = b.minBin + int24(int256(i));
-            int24 tickLo = _tickAtBin(id, idx);
+            int24 tickLo = b.tickLowerAtBin(idx);
             bins[i] = SwapMath.Bin({
                 L: liquidity[id][idx],
                 sqrtLo: TickMath.getSqrtPriceAtTick(tickLo),
@@ -682,18 +574,6 @@ contract BinBook is BaseCustomCurve {
             });
             if (idx == b.currentBin) active = i;
         }
-    }
-
-    function _tickAtBin(PoolId id, int24 idx) internal view returns (int24) {
-        int256 tick = int256(idx) * int256(books[id].binSize);
-        if (tick < TickMath.MIN_TICK || tick > TickMath.MAX_TICK) revert InvalidTickRange();
-        return int24(tick);
-    }
-
-    function _floorDiv(int24 a, int24 b) internal pure returns (int24) {
-        int24 q = a / b;
-        if (a % b != 0 && a < 0) q -= 1;
-        return q;
     }
 
     /// @dev Shared bin size validation for createPool.

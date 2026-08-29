@@ -19,7 +19,7 @@ import {BaseTest} from "./utils/BaseTest.sol";
 
 /// @dev Validates that BinBook's on-chain swap engine matches a pure-library simulation of
 ///      the same book state bit-exactly, plus general add/swap/remove/collect workflows.
-contract BinBookSwapEngineTest is BaseTest {
+contract BinBookSwapTest is BaseTest {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -53,7 +53,7 @@ contract BinBookSwapEngineTest is BaseTest {
     }
 
     function _add(uint256 a0, uint256 a1) internal {
-        _addRange(a0, a1, 0, 0);
+        _addRange(a0, a1, -600, 600);
     }
 
     function _addRange(uint256 a0, uint256 a1, int24 tickLower, int24 tickUpper) internal {
@@ -216,8 +216,8 @@ contract BinBookSwapEngineTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -253,8 +253,8 @@ contract BinBookSwapEngineTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );

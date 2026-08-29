@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { useBook } from "@/hooks/useBook";
 import { useDeployment } from "@/hooks/useDeployment";
 import { usePool } from "@/hooks/usePool";
 import { useSwapActivity } from "@/hooks/useSwapActivity";
@@ -8,6 +9,7 @@ import { useTokenMeta } from "@/hooks/useTokenMeta";
 import { useTvl } from "@/hooks/useTvl";
 import { computeStats, toCandles, type Candle } from "@/lib/priceSeries";
 import { demoCandles, demoStats } from "@/lib/demo";
+import { formatPriceHuman, sqrtPriceX96ToPrice } from "@/lib/priceMath";
 
 function sparkPoints(candles: Candle[], w = 120, h = 32): string {
   if (candles.length < 2) return "";
@@ -30,15 +32,10 @@ function fmtUsd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-function fmtPrice(p: number): string {
-  if (p >= 1) return p.toFixed(4);
-  if (p >= 0.0001) return p.toFixed(6);
-  return p.toExponential(2);
-}
-
 export function StatsBar() {
   const { deployment, ready } = useDeployment();
   const { key } = usePool();
+  const { book } = useBook();
   const preview = !ready;
 
   const base = useTokenMeta(key?.currency0);
@@ -49,13 +46,18 @@ export function StatsBar() {
   const liveStats = useMemo(() => computeStats(events, quoteDecimals), [events, quoteDecimals]);
   const stats = preview ? demoStats() : liveStats;
 
+  // The pool's live AMM price is always available once it's seeded — unlike lastPrice, which
+  // needs an actual trade to have happened. Fall back to lastPrice only if that's ever unset.
+  const bookPrice = book && book.sqrtPriceX96 > 0n ? sqrtPriceX96ToPrice(book.sqrtPriceX96) : null;
+  const spotPrice = preview ? stats.lastPrice : (bookPrice ?? stats.lastPrice);
+
   const candles = useMemo(
     () => (preview ? demoCandles() : toCandles(events, 30 * 60)),
     [preview, events]
   );
   const spark = useMemo(() => sparkPoints(candles), [candles]);
 
-  const tvl = useTvl(stats.lastPrice);
+  const tvl = useTvl(spotPrice);
 
   const baseSymbol = preview ? "DEMO" : (base.symbol ?? "…");
   const quoteSymbol = preview ? "USDC" : (quote.symbol ?? "…");
@@ -86,7 +88,7 @@ export function StatsBar() {
         <div className="stat-pill">
           <span className="stat-pill-label">Price</span>
           <span className="stat-pill-value">
-            {stats.lastPrice != null ? fmtPrice(stats.lastPrice) : "—"}
+            {spotPrice != null ? formatPriceHuman(spotPrice) : "—"}
           </span>
         </div>
         <div className="stat-pill">

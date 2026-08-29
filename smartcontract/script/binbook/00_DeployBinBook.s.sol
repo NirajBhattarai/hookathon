@@ -14,22 +14,36 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {BinBook} from "../../src/BinBook.sol";
 import {BinBookBase} from "./BinBookBase.s.sol";
 
-/// @notice Deploys tokens + the BinBook hook (mined flags via canonical CREATE2 factory),
-///         initializes the pool against the official Sepolia PoolManager, and saves the
-///         deployment to deployments/<chainid>.json for downstream scripts.
+/// @notice Deploys the BinBook hook (mined flags via canonical CREATE2 factory) and creates its
+///         first pool against the official Sepolia PoolManager, then saves the deployment to
+///         deployments/<chainid>.json for downstream scripts.
+///         Env: TOKEN0/TOKEN1 (optional) — reuse existing tokens (e.g. a live faucet pair) instead
+///         of minting a fresh throwaway Token A/Token B, so a hook redeploy keeps working with the
+///         same tokens users already hold balances of.
 contract DeployBinBook is BinBookBase {
     function run() external {
         address broadcaster = vm.getWallets()[0];
 
         vm.startBroadcast();
 
-        MockERC20 tA = new MockERC20("Token A", "TKA", 18);
-        MockERC20 tB = new MockERC20("Token B", "TKB", 18);
-        (Currency c0, Currency c1) = address(tA) < address(tB)
-            ? (Currency.wrap(address(tA)), Currency.wrap(address(tB)))
-            : (Currency.wrap(address(tB)), Currency.wrap(address(tA)));
-        tA.mint(broadcaster, 1_000_000e18);
-        tB.mint(broadcaster, 1_000_000e18);
+        address existingToken0 = vm.envOr("TOKEN0", address(0));
+        address existingToken1 = vm.envOr("TOKEN1", address(0));
+
+        Currency c0;
+        Currency c1;
+        if (existingToken0 != address(0) && existingToken1 != address(0)) {
+            (c0, c1) = existingToken0 < existingToken1
+                ? (Currency.wrap(existingToken0), Currency.wrap(existingToken1))
+                : (Currency.wrap(existingToken1), Currency.wrap(existingToken0));
+        } else {
+            MockERC20 tA = new MockERC20("Token A", "TKA", 18);
+            MockERC20 tB = new MockERC20("Token B", "TKB", 18);
+            (c0, c1) = address(tA) < address(tB)
+                ? (Currency.wrap(address(tA)), Currency.wrap(address(tB)))
+                : (Currency.wrap(address(tB)), Currency.wrap(address(tA)));
+            tA.mint(broadcaster, 1_000_000e18);
+            tB.mint(broadcaster, 1_000_000e18);
+        }
 
         uint160 flags = uint160(
             Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
@@ -44,7 +58,9 @@ contract DeployBinBook is BinBookBase {
 
         PoolKey memory key =
             PoolKey({currency0: c0, currency1: c1, fee: POOL_FEE, tickSpacing: TICK_SPACING, hooks: IHooks(hookAddr)});
-        POOL_MANAGER.initialize(key, 2 ** 96);
+        // Pools can only be born via createPool now (BinBook self-initializes and locks bin size
+        // atomically) — a direct PoolManager.initialize() call reverts with InitializeViaCreatePool.
+        binBook.createPool(key, 2 ** 96, TICK_SPACING);
 
         vm.stopBroadcast();
 

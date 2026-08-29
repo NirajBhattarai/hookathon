@@ -17,6 +17,7 @@ import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCus
 
 import {BinBook} from "../src/BinBook.sol";
 import {SwapMath} from "../src/libraries/SwapMath.sol";
+import {BinLayout} from "../src/libraries/BinLayout.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 
 contract BinBookTest is BaseTest {
@@ -53,7 +54,7 @@ contract BinBookTest is BaseTest {
     }
 
     function _add(uint256 a0, uint256 a1) internal returns (BalanceDelta delta) {
-        return _addRange(a0, a1, 0, 0);
+        return _addRange(a0, a1, -600, 600);
     }
 
     function _addRange(uint256 a0, uint256 a1, int24 tickLower, int24 tickUpper) internal returns (BalanceDelta delta) {
@@ -74,7 +75,7 @@ contract BinBookTest is BaseTest {
 
     function _seed() internal {
         _approve();
-        _add(100 ether, 100 ether);
+        _addRange(100 ether, 100 ether, -600, 600);
     }
 
     // ── permissions / config ─────────────────────────────────────────────
@@ -137,8 +138,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -212,8 +213,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -266,8 +267,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -285,8 +286,8 @@ contract BinBookTest is BaseTest {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -600,
+                tickUpper: 600,
                 userInputSalt: bytes32(0)
             })
         );
@@ -298,8 +299,9 @@ contract BinBookTest is BaseTest {
         uint128 L0 = hook.liquidity(poolId, cur);
         uint128 L1 = hook.liquidity(poolId, cur + 1);
         assertGt(L0, L1);
-        assertApproxEqAbs(uint256(L1) * 9, uint256(L0) * 8, 100);
-        assertEq(hook.liquidity(poolId, cur + 9), 0);
+        // ramp = farthestDistance + 1 = 11; cur distance=1 (L∝10/11), cur+1 distance=2 (L∝9/11)
+        assertApproxEqAbs(uint256(L1) * 10, uint256(L0) * 9, 100);
+        assertEq(hook.liquidity(poolId, cur + 10), 0);
     }
 
     function test_addLiquidity_range_expandsBookBelow() public {
@@ -366,21 +368,22 @@ contract BinBookTest is BaseTest {
 
     function test_addLiquidity_range_reverts_misaligned() public {
         _approve();
-        vm.expectRevert(BinBook.TicksNotAlignedToBins.selector);
+        vm.expectRevert(BinLayout.TicksNotAlignedToBins.selector);
         _addRange(0, 1 ether, -181, -60);
     }
 
     function test_addLiquidity_range_reverts_tooManyBins() public {
         _approve();
-        // 257 bins of size 60
-        vm.expectRevert(BinBook.TooManyBins.selector);
-        _addRange(0, 1 ether, -257 * 60, 0);
+        // 65 bins of size 60
+        vm.expectRevert(BinLayout.TooManyBins.selector);
+        _addRange(0, 1 ether, -65 * 60, 0);
     }
 
     function test_addLiquidity_range_usdcOnlyWrongSide_reverts() public {
         _approve();
-        // Above spot needs token0; USDC-only (token1) cannot fill it.
+        // Above spot needs token0; providing only token1 (wrong side) reverts.
         vm.expectRevert(SwapMath.InsufficientLiquidity.selector);
+        _addRange(0, 100 ether, 60, 120);
     }
 
     function test_swap_walksEmptyGapToFarBin() public {
@@ -398,8 +401,13 @@ contract BinBookTest is BaseTest {
         _approve();
         // Narrow range needs only ramp 4, but the no-ramp path keeps the DEFAULT_RAMP = 10 floor.
         _addRange(100 ether, 100 ether, -3 * 60, 3 * 60);
-        assertEq(hook.liquidity(poolId, -1), hook.liquidity(poolId, 0));
-        assertEq(uint256(hook.liquidity(poolId, -3)) * 9, uint256(hook.liquidity(poolId, 0)) * 7);
+        // depositLBase clamps the last bin(s) it touches so cumulative spend never exceeds
+        // amount0Desired/amount1Desired (see BinLayout.depositLBase) — a budget-fitting
+        // correction unrelated to the ramp formula itself, on the order of 1e-15 relative here.
+        // Compare with a tight relative tolerance instead of exact equality so this test still
+        // isolates ramp-formula correctness rather than budget-clamp precision.
+        assertApproxEqRel(hook.liquidity(poolId, -1), hook.liquidity(poolId, 0), 1e9);
+        assertApproxEqRel(uint256(hook.liquidity(poolId, -3)) * 9, uint256(hook.liquidity(poolId, 0)) * 7, 1e9);
     }
 
     // ── swap ─────────────────────────────────────────────────────────────
@@ -439,107 +447,5 @@ contract BinBookTest is BaseTest {
         assertGt(afterUp, start);
         swapRouter.swapExactTokensForTokens(5 ether, 0, true, poolKey, "", address(this), block.timestamp);
         assertLt(hook.currentSqrtPriceX96(poolId), afterUp);
-    }
-
-    // ── fee shares ───────────────────────────────────────────────────────
-
-    function _bob() internal returns (address user2) {
-        user2 = address(0xB0B);
-        MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
-        MockERC20 t1 = MockERC20(Currency.unwrap(currency1));
-        t0.mint(user2, 1_000 ether);
-        t1.mint(user2, 1_000 ether);
-        vm.startPrank(user2);
-        t0.approve(address(hook), type(uint256).max);
-        t1.approve(address(hook), type(uint256).max);
-        vm.stopPrank();
-    }
-
-    function test_fees_sameRange_splitByL() public {
-        _approve();
-        address bob = _bob();
-        _addRange(0, 100 ether, -20 * 60, -5 * 60);
-        vm.prank(bob);
-        _addRange(0, 50 ether, -20 * 60, -5 * 60);
-
-        int24 bin = -6;
-        uint128 lAlice = hook.liquidityOf(poolId, address(this), bin);
-        uint128 lBob = hook.liquidityOf(poolId, bob, bin);
-        assertApproxEqAbs(uint256(lAlice), uint256(lBob) * 2, 2);
-
-        swapRouter.swapExactTokensForTokens(2 ether, 0, true, poolKey, "", address(this), block.timestamp);
-
-        (uint256 a0,) = hook.pendingFees(poolId, address(this));
-        (uint256 b0,) = hook.pendingFees(poolId, bob);
-        assertGt(a0, 0);
-        assertGt(b0, 0);
-        assertApproxEqRel(a0, b0 * 2, 0.02e18);
-    }
-
-    function test_fees_onlyBinsTouchedEarn() public {
-        _approve();
-        address bob = _bob();
-        _addRange(0, 100 ether, -30 * 60, -20 * 60);
-        vm.prank(bob);
-        _addRange(0, 100 ether, -8 * 60, 0);
-
-        swapRouter.swapExactTokensForTokens(0.2 ether, 0, true, poolKey, "", address(this), block.timestamp);
-
-        (uint256 a0,) = hook.pendingFees(poolId, address(this));
-        (uint256 b0,) = hook.pendingFees(poolId, bob);
-        assertEq(a0, 0);
-        assertGt(b0, 0);
-    }
-
-    function test_fees_collectPaysUser() public {
-        _approve();
-        _addRange(0, 100 ether, -20 * 60, -5 * 60);
-        swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
-
-        (uint256 pending0,) = hook.pendingFees(poolId, address(this));
-        assertGt(pending0, 0);
-
-        MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
-        uint256 before = t0.balanceOf(address(this));
-        (uint256 got0, uint256 got1) = hook.collectFees(poolKey);
-        assertEq(got0, pending0);
-        assertEq(got1, 0);
-        assertEq(t0.balanceOf(address(this)), before + got0);
-
-        (uint256 after0,) = hook.pendingFees(poolId, address(this));
-        assertEq(after0, 0);
-    }
-
-    function test_fees_overlapAliceBob() public {
-        _approve();
-        address bob = _bob();
-        _addRange(0, 100 ether, -30 * 60, -15 * 60);
-        vm.prank(bob);
-        _addRange(0, 100 ether, -20 * 60, 0);
-
-        int24 overlap = -16;
-        assertGt(hook.liquidityOf(poolId, address(this), overlap), 0);
-        assertGt(hook.liquidityOf(poolId, bob, overlap), 0);
-        assertEq(hook.liquidityOf(poolId, address(this), -2), 0);
-        assertGt(hook.liquidityOf(poolId, bob, -2), 0);
-
-        swapRouter.swapExactTokensForTokens(3 ether, 0, true, poolKey, "", address(this), block.timestamp);
-
-        (uint256 a0,) = hook.pendingFees(poolId, address(this));
-        (uint256 b0,) = hook.pendingFees(poolId, bob);
-        assertGt(b0, a0);
-        assertGt(a0 + b0, 0);
-    }
-
-    function test_fees_secondAddRealizesThenCollect() public {
-        _approve();
-        _addRange(0, 50 ether, -20 * 60, -5 * 60);
-        swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
-        (uint256 pending0,) = hook.pendingFees(poolId, address(this));
-        _addRange(0, 50 ether, -20 * 60, -5 * 60);
-        (uint256 still,) = hook.pendingFees(poolId, address(this));
-        assertApproxEqAbs(still, pending0, 1);
-        (uint256 got0,) = hook.collectFees(poolKey);
-        assertApproxEqAbs(got0, pending0, 1);
     }
 }

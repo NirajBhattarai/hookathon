@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   encodeAbiParameters,
   formatUnits,
@@ -17,7 +17,10 @@ import {
   useWriteContract,
 } from "wagmi";
 import { useDeployment } from "@/hooks/useDeployment";
-import { FAUCET_TOKENS, findToken, tokenByAddress } from "@/lib/tokens";
+import { TokenSelect } from "@/components/TokenSelect";
+import { TxModal, type TxStatus, type TxStep } from "@/components/TxModal";
+import { formatPriceHuman } from "@/lib/priceMath";
+import { findToken, tokenByAddress } from "@/lib/tokens";
 
 /**
  * BinQuoter performs the real pool swap inside PoolManager.unlock() and reverts
@@ -181,101 +184,6 @@ const erc20MetaAbi = [
   },
 ] as const;
 
-function TokenAvatar({ color, symbol }: { color?: string; symbol: string }) {
-  return (
-    <span
-      className="token-avatar token-avatar-sm"
-      style={color ? { background: color } : undefined}
-    >
-      {symbol.slice(0, 1)}
-    </span>
-  );
-}
-
-function TokenSelect({
-  value,
-  onSelect,
-  disabled,
-}: {
-  value: Address;
-  onSelect: (a: Address) => void;
-  disabled?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-  const current = tokenByAddress(value);
-
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, []);
-
-  const list = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    return FAUCET_TOKENS.filter(
-      (t) => !s || t.symbol.toLowerCase().includes(s) || t.name.toLowerCase().includes(s)
-    );
-  }, [q]);
-
-  return (
-    <div className="tok-select" ref={ref}>
-      <button
-        type="button"
-        className="tok-select-btn"
-        disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-      >
-        <TokenAvatar color={current?.color} symbol={current?.symbol ?? "?"} />
-        <strong>{current?.symbol ?? "Select"}</strong>
-        <span className="tok-caret">▾</span>
-      </button>
-
-      {open && (
-        <div className="tok-menu" role="listbox">
-          <input
-            className="faucet-search tok-search"
-            placeholder="Search token…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            autoFocus
-          />
-          <ul>
-            {list.map((t) => (
-              <li key={t.address}>
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={t.address === value}
-                  className={`tok-row ${t.address === value ? "tok-row-active" : ""}`}
-                  onClick={() => {
-                    onSelect(t.address);
-                    setOpen(false);
-                    setQ("");
-                  }}
-                >
-                  <TokenAvatar color={t.color} symbol={t.symbol} />
-                  <span className="tok-id">
-                    <strong>{t.symbol}</strong>
-                    <span>{t.name}</span>
-                  </span>
-                  <span className="muted tiny">{t.category}</span>
-                </button>
-              </li>
-            ))}
-            {!list.length && <li className="muted tiny tok-empty">No match</li>}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function SwapForm() {
   const { address, isConnected } = useAccount();
   const { deployment } = useDeployment();
@@ -319,7 +227,8 @@ export function SwapForm() {
     [deployment, c0, c1]
   );
 
-  // probe BinBook.isConfigured(poolId) for every candidate
+  // probe BinBook.initializedPools(poolId) for every candidate — set true inside createPool(),
+  // the only source of truth for "has this exact poolId actually been created".
   const discoverQ = useReadContracts({
     query: { enabled: !!deployment && !!c0 && !!c1 },
     contracts: tickCandidates.map((ts) => ({
@@ -327,13 +236,13 @@ export function SwapForm() {
       abi: [
         {
           type: "function",
-          name: "isConfigured",
+          name: "initializedPools",
           stateMutability: "view",
           inputs: [{ name: "", type: "bytes32" }],
           outputs: [{ name: "", type: "bool" }],
         },
       ] as const,
-      functionName: "isConfigured",
+      functionName: "initializedPools",
       args: [poolIdOf(ts)!],
     })),
   });
@@ -460,10 +369,19 @@ export function SwapForm() {
   const erc20ToRouter = (allowQ.data?.[0]?.result as bigint | undefined) ?? 0n;
 
   const { writeContractAsync, isPending } = useWriteContract();
-  const { data: hash, isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({});
+  const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
+  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash ?? undefined });
+
+  const [txModalOpen, setTxModalOpen] = useState(false);
+  const [txModalStatus, setTxModalStatus] = useState<TxStatus>("pending");
+  const [txError, setTxError] = useState<string | null>(null);
+  const [txSteps, setTxSteps] = useState<TxStep[]>([]);
+
+  const needsApproval = erc20ToRouter < amountInRaw;
 
   useEffect(() => {
     if (!isSuccess) return;
+    setTxModalStatus("success");
     setStatus("Swap complete");
     setSwapError(null);
     metaQ.refetch();
@@ -519,13 +437,25 @@ export function SwapForm() {
     if (!deployment || !key || !address || amountInRaw === 0n || inAddr === outAddr) return;
     setStatus(null);
     setSwapError(null);
+    setTxError(null);
+    setTxModalOpen(true);
+    setTxModalStatus("pending");
+    setTxHash(null);
+
+    const approvalStep: TxStep = { label: `Approve ${paySymbol}`, done: false };
+    const swapStep: TxStep = { label: `Swap ${paySymbol} → ${recvSymbol}`, done: false };
+    setTxSteps(needsApproval ? [approvalStep, swapStep] : [swapStep]);
+
     try {
-      await ensureApproval();
-      await writeContractAsync({
+      if (needsApproval) {
+        await ensureApproval();
+        setTxSteps((prev) => prev.map((s, i) => (i === 0 ? { ...s, done: true } : s)));
+      }
+      const hash = await writeContractAsync({
         address: deployment.swapRouter,
         abi: swapRouterAbi,
         functionName: "swapExactTokensForTokens",
-        gas: 1_500_000n, // keep under RPC gas caps; router+hook swaps use ~250-450k
+        gas: 1_500_000n,
         args: [
           amountInRaw,
           minOutRaw,
@@ -536,15 +466,24 @@ export function SwapForm() {
           BigInt(Math.floor(Date.now() / 1000) + 600),
         ],
       });
+      setTxSteps((prev) => prev.map((s) => ({ ...s, done: true })));
+      setTxHash(hash);
+      setTxModalStatus("confirming");
     } catch (err) {
+      setTxModalStatus("error");
       const msg =
         err instanceof Error ? `${err.message} ${(err as { data?: unknown }).data ?? ""}` : "";
       if (/InsufficientLiquidity|PoolNotConfigured|PoolNotInitialized/i.test(msg)) {
+        setTxError(
+          `No ${paySymbol}/${recvSymbol} pool with liquidity yet — add liquidity first.`
+        );
         setSwapError(
           `No ${paySymbol}/${recvSymbol} pool with liquidity yet — add liquidity first.`
         );
       } else {
-        setSwapError(err instanceof Error ? err.message.slice(0, 160) : "Swap failed");
+        const shortMsg = err instanceof Error ? err.message.slice(0, 160) : "Swap failed";
+        setTxError(shortMsg);
+        setSwapError(shortMsg);
       }
     }
   }
@@ -557,6 +496,10 @@ export function SwapForm() {
     const dp = v >= 1 ? 4 : v >= 0.0001 ? 8 : 12;
     return v.toFixed(dp).replace(/\.?0+$/, "");
   }, [estimatedOutRaw, recvDecimals]);
+
+  const txSummary = amountIn && paySymbol && recvSymbol && fmtOut !== "—"
+    ? `${amountIn} ${paySymbol} → ${fmtOut} ${recvSymbol}`
+    : undefined;
 
   return (
     <form className="swap-card" onSubmit={onSubmit}>
@@ -624,11 +567,7 @@ export function SwapForm() {
         <summary>
           <span>
             1 {paySymbol ?? "?"} ≈{" "}
-            {fmtOut === "—"
-              ? "—"
-              : Number(fmtOut) / (Number(amountIn) || 1) >= 0.0001
-                ? (Number(fmtOut) / (Number(amountIn) || 1)).toFixed(6)
-                : (Number(fmtOut) / (Number(amountIn) || 1)).toExponential(2)}{" "}
+            {fmtOut === "—" ? "—" : formatPriceHuman(Number(fmtOut) / (Number(amountIn) || 1))}{" "}
             {recvSymbol ?? "?"}
           </span>
           <span>Details</span>
@@ -721,6 +660,18 @@ export function SwapForm() {
 
       {swapError && <p className="status warn">{swapError}</p>}
       {status && <p className="status ok">{status}</p>}
+
+      <TxModal
+        open={txModalOpen}
+        onClose={() => setTxModalOpen(false)}
+        status={txModalStatus}
+        hash={txHash}
+        chainId={deployment?.chainId}
+        error={txError}
+        action="Swap"
+        summary={txSummary}
+        steps={txSteps}
+      />
     </form>
   );
 }
