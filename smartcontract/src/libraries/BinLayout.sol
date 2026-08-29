@@ -118,10 +118,35 @@ library BinLayout {
         maxB = cur + n - 1;
     }
 
+    /// @notice Validates a tick range (alignment, bounds, per-call bin cap) and converts it into
+    ///         an inclusive bin range `[tickLower/binSize, tickUpper/binSize - 1]`.
+    /// @dev Shared by `resolveWindow` (addLiquidity) and BinBook's removeLiquidity range walk, so
+    ///      both paths validate and convert ticks identically.
+    /// @param book The pool's book state (binSize source)
+    /// @param tickLower Lower tick of the requested range, must be bin-aligned
+    /// @param tickUpper Upper tick of the requested range, must be bin-aligned and greater than tickLower
+    /// @return minB Lowest bin index of the range
+    /// @return maxB Highest bin index of the range (inclusive)
+    function resolveBinRange(Book storage book, int24 tickLower, int24 tickUpper)
+        internal
+        view
+        returns (int24 minB, int24 maxB)
+    {
+        if (tickLower >= tickUpper) revert InvalidTickRange();
+        if (tickLower % book.binSize != 0 || tickUpper % book.binSize != 0) revert TicksNotAlignedToBins();
+        if (tickLower < TickMath.MIN_TICK || tickUpper > TickMath.MAX_TICK) revert InvalidTickRange();
+
+        minB = tickLower / book.binSize;
+        maxB = tickUpper / book.binSize - 1;
+        if (maxB < minB) revert InvalidTickRange();
+
+        uint256 n = uint256(int256(maxB - minB + 1));
+        if (n > MAX_BINS_PER_ADD) revert TooManyBins();
+    }
+
     /// @notice Resolves the bin window for an addLiquidity tick range against pool state.
-    /// @dev Validates alignment (`tick % binSize == 0` on both edges), tick bounds, and the
-    ///      per-add bin cap, then derives the inclusive bin range `[tickLower/binSize, tickUpper/binSize - 1]`
-    ///      and its auto-floored decay radius. `cur` is resolved from `b` itself.
+    /// @dev Validates and converts via `resolveBinRange`, then adds the add-path-specific active
+    ///      bin and auto-floored decay radius.
     /// @param book The pool's book state (binSize, ramp, and active-bin source)
     /// @param tickLower Lower tick of the requested range, must be bin-aligned
     /// @param tickUpper Upper tick of the requested range, must be bin-aligned and greater than tickLower
@@ -131,24 +156,13 @@ library BinLayout {
         view
         returns (Window memory window)
     {
-        if (tickLower >= tickUpper) revert InvalidTickRange();
+        (int24 minB, int24 maxB) = resolveBinRange(book, tickLower, tickUpper);
 
         (,, int24 cur) = bookRange(book);
         window.cur = cur;
-
-        if (tickLower % book.binSize != 0 || tickUpper % book.binSize != 0) revert TicksNotAlignedToBins();
-        if (tickLower < TickMath.MIN_TICK || tickUpper > TickMath.MAX_TICK) revert InvalidTickRange();
-
-        int24 userMin = tickLower / book.binSize;
-        int24 userMax = tickUpper / book.binSize - 1;
-        if (userMax < userMin) revert InvalidTickRange();
-
-        uint256 n = uint256(int256(userMax - userMin + 1));
-        if (n > MAX_BINS_PER_ADD) revert TooManyBins();
-
-        window.minB = userMin;
-        window.maxB = userMax;
-        window.ramp = resolveRamp(userMin, userMax, cur, book.baseRamp);
+        window.minB = minB;
+        window.maxB = maxB;
+        window.ramp = resolveRamp(minB, maxB, cur, book.baseRamp);
     }
 
     /// @notice Grows a book's contiguous bin range to cover `[fillMin, fillMax]` (and `cur`),

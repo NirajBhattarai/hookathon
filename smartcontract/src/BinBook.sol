@@ -95,6 +95,7 @@ contract BinBook is BaseCustomCurve {
     error InsufficientShares();
     error InitializeViaCreatePool();
     error InvalidHook();
+    error InsufficientRangeLiquidity();
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -184,22 +185,40 @@ contract BinBook is BaseCustomCurve {
         shares = params.liquidity;
         if (shares == 0 || shares > userShares) revert InsufficientShares();
 
-        // Redeem directly from this user's own bins/positions (their own L, priced at the
-        // current bin prices) rather than a pool-wide proportional slice of aggregate claim
-        // balances — a blended, pool-wide payout would hand a withdrawing user tokens that never
-        // backed their own position at all, at the expense of other LPs in disjoint bins.
-        (amount0, amount1) = _decreaseUserL(id, msg.sender, shares, userShares);
+        // Scope the redemption to the caller's chosen [tickLower, tickUpper] instead of walking
+        // this user's entire historical bin range (userRanges only ever widens — see
+        // BinLayout.increaseUserL — so that range can grow far beyond what's actually being
+        // withdrawn here, making removeLiquidity's cost scale with a stale span rather than the
+        // request). Validate/convert the same way addLiquidity does.
+        BinLayout.Book storage book = books[id];
+        (int24 minB, int24 maxB) = book.resolveBinRange(params.tickLower, params.tickUpper);
+
+        // Value target, computed as the exact inverse of getMintShares: shares * totalValueBefore /
+        // totalSupply — the pool-wide total shares outstanding, NOT this caller's own share
+        // balance (using userShares here would let anyone burning 100% of their own shares walk
+        // away with the value of the ENTIRE pool whenever they aren't the sole LP). reserve0/
+        // reserve1 and the live price give the *same* token0-equivalent value formula
+        // addLiquidity's share minting uses (SwapMath.valueOf), so `shares` worth of value is
+        // pinned down before any bin is touched. The range walk below then drains only the
+        // caller's chosen bins until that value is redeemed, and reverts rather than
+        // over/under-paying if the range can't cover it — this is what keeps a caller from
+        // cherry-picking favorably-priced bins to redeem shares at more than their fair value, at
+        // other LPs' expense.
+        uint256 reserve0 = poolManager.balanceOf(address(this), key.currency0.toId());
+        uint256 reserve1 = poolManager.balanceOf(address(this), key.currency1.toId());
+        uint256 targetValue =
+            FullMath.mulDiv(SwapMath.valueOf(reserve0, reserve1, book.sqrtPriceX96), shares, totalShares[id]);
+
+        (amount0, amount1) = _decreaseUserLInRange(id, msg.sender, minB, maxB, targetValue);
 
         // tokenAmountsForBin recomputes token0/token1 fresh from L, while depositLBase derived
         // the amounts originally taken in by proportionally scaling a shared per-bin reference
         // (so a multi-bin deposit's total never drifts over its budget under floor rounding) —
         // the two paths can disagree by a few wei per bin. Clamp to the pool's actual claim
-        // balance so that drift can never make a withdrawal try to pull out more than the hook
-        // holds.
-        uint256 avail0 = poolManager.balanceOf(address(this), key.currency0.toId());
-        uint256 avail1 = poolManager.balanceOf(address(this), key.currency1.toId());
-        if (amount0 > avail0) amount0 = avail0;
-        if (amount1 > avail1) amount1 = avail1;
+        // balance (read before the walk above; nothing external can move it in between) so that
+        // drift can never make a withdrawal try to pull out more than the hook holds.
+        if (amount0 > reserve0) amount0 = reserve0;
+        if (amount1 > reserve1) amount1 = reserve1;
     }
 
     function _getUnspecifiedAmount(PoolKey calldata key, SwapParams calldata params)
@@ -444,23 +463,50 @@ contract BinBook is BaseCustomCurve {
         b.currentBin = b.minBin + int24(int256(endIndex));
     }
 
-    /// @dev Reduces the caller's bin L proportional to shares burned / their total shares, and
-    ///      returns the token0/token1 that L actually backs at each bin's current price — this
-    ///      user's own position, not a slice of the pool's aggregate reserves.
-    function _decreaseUserL(PoolId id, address user, uint256 sharesBurned, uint256 userShares)
+    /// @dev Burns a single, uniform fraction (`targetValue / rangeValue`) of the caller's L from
+    ///      every bin in `[minB, maxB]`, returning the token0/token1 that L actually backs — this
+    ///      user's own position within the requested range, not a slice of the pool's aggregate
+    ///      reserves. Two passes rather than an order-dependent running-total walk: measuring the
+    ///      range's total value first (pass 1) before burning anything means the fraction applied
+    ///      is the same for every bin, so it can never exceed `targetValue` in aggregate (capping
+    ///      what a caller can extract regardless of which bins they point at — see
+    ///      `_getAmountOut`'s value-target comment) and any cross-path rounding drift (see
+    ///      `tokenAmountsForBin` vs `depositLBase`) lands as a tiny uniform residue instead of
+    ///      concentrated in whichever bin a running-total walk happened to stop at. Reverts if the
+    ///      range doesn't hold enough value to cover the target at all.
+    function _decreaseUserLInRange(PoolId id, address user, int24 minB, int24 maxB, uint256 targetValue)
         internal
         returns (uint256 amount0, uint256 amount1)
     {
-        BinLayout.Book storage book = books[id];
-        BinLayout.UserRange memory r = userRanges[id][user];
-        if (!r.set || userShares == 0) return (0, 0);
+        if (targetValue == 0) return (0, 0);
 
-        for (int24 idx = r.minB; idx <= r.maxB; ++idx) {
+        BinLayout.Book storage book = books[id];
+
+        // Pass 1: settle fees and measure this range's total redeemable value at the current
+        // price. No liquidity is touched yet.
+        uint256 rangeValue;
+        for (int24 idx = minB; idx <= maxB; ++idx) {
             BinLayout.Position storage p = positions[id][user][idx];
             uint256 L = p.liquidity;
             if (L == 0) continue;
             BinLayout.settleFees(p, feeGrowth0X128[id], feeGrowth1X128[id], idx);
-            uint256 burnL = L * sharesBurned / userShares;
+
+            (uint256 t0, uint256 t1) = book.tokenAmountsForBin(idx, L);
+            rangeValue += SwapMath.valueOf(t0, t1, book.sqrtPriceX96);
+        }
+
+        if (rangeValue < targetValue) revert InsufficientRangeLiquidity();
+
+        // Pass 2: burn targetValue/rangeValue (<= 1, guaranteed by the check above) of L from
+        // every bin. Floors, so aggregate redeemed value can only ever land at or under the
+        // target — the same rounding-direction convention as depositLBase's clamp.
+        uint256 fractionQ128 = FullMath.mulDiv(targetValue, FixedPoint128.Q128, rangeValue);
+        for (int24 idx = minB; idx <= maxB; ++idx) {
+            BinLayout.Position storage p = positions[id][user][idx];
+            uint256 L = p.liquidity;
+            if (L == 0) continue;
+
+            uint256 burnL = FullMath.mulDiv(L, fractionQ128, FixedPoint128.Q128);
             if (burnL == 0) continue;
             if (burnL > L) burnL = L;
 

@@ -448,5 +448,4 @@ contract BinBookTest is BaseTest {
         swapRouter.swapExactTokensForTokens(5 ether, 0, true, poolKey, "", address(this), block.timestamp);
         assertLt(hook.currentSqrtPriceX96(poolId), afterUp);
     }
-
 }

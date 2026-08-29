@@ -22,10 +22,31 @@ export function usePairPosition(pair?: PoolPairOverride) {
   const contracts = useMemo(() => {
     if (!ready || !deployment || !address || !poolId) return [];
     return [
-      { address: deployment.binBook, abi: binBookAbi, functionName: "getShares", args: [poolId, address] },
-      { address: deployment.binBook, abi: binBookAbi, functionName: "getTotalShares", args: [poolId] },
-      { address: deployment.binBook, abi: binBookAbi, functionName: "pendingFees", args: [poolId, address] },
+      {
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "getShares",
+        args: [poolId, address],
+      },
+      {
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "getTotalShares",
+        args: [poolId],
+      },
+      {
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "pendingFees",
+        args: [poolId, address],
+      },
       { address: deployment.binBook, abi: binBookAbi, functionName: "books", args: [poolId] },
+      {
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "userRanges",
+        args: [poolId, address],
+      },
     ];
   }, [ready, deployment, address, poolId]);
 
@@ -41,12 +62,17 @@ export function usePairPosition(pair?: PoolPairOverride) {
     const totalShares = (q.data[1]?.result as bigint | undefined) ?? 0n;
     const fees = q.data[2]?.result as readonly [bigint, bigint] | undefined;
     const book = q.data[3]?.result as
-      | readonly [number, number, number, number, number, number, bigint, boolean]
-      | undefined;
+      readonly [number, number, number, number, number, number, bigint, boolean] | undefined;
+    const binSize = book?.[0] ?? 0;
+    const range = q.data[4]?.result as readonly [number, number, boolean] | undefined;
+    const hasRange = range?.[2] ?? false;
+    // Inverse of BinLayout.resolveBinRange: tickLower = minB * binSize, tickUpper = (maxB + 1) * binSize.
+    const tickLower = hasRange ? range![0] * binSize : 0;
+    const tickUpper = hasRange ? (range![1] + 1) * binSize : 0;
     return {
       poolId,
       key,
-      binSize: book?.[0] ?? 0,
+      binSize,
       shares,
       totalShares,
       sharePct: totalShares > 0n ? Number((shares * 10000n) / totalShares) / 100 : 0,
@@ -54,6 +80,9 @@ export function usePairPosition(pair?: PoolPairOverride) {
       fee1: fees?.[1] ?? 0n,
       sqrtPriceX96: book?.[6] ?? 0n,
       currentBin: book?.[3] ?? 0,
+      tickLower,
+      tickUpper,
+      hasRange,
     };
   }, [key, poolId, q.data]);
 

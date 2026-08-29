@@ -18,6 +18,13 @@ export type Position = {
   fee1: bigint;
   sqrtPriceX96: bigint;
   currentBin: number;
+  // The caller's own contiguous bin range in this pool (from `userRanges`), converted back to
+  // ticks — required by removeLiquidity/collectFees, which now scope to this exact range instead
+  // of walking a pool-wide position. `hasRange` is false when userRanges was never seeded (no
+  // deposit yet), in which case tickLower/tickUpper are meaningless zeros.
+  tickLower: number;
+  tickUpper: number;
+  hasRange: boolean;
 };
 
 /**
@@ -32,12 +39,36 @@ export function usePositions() {
 
   const contracts = useMemo(() => {
     if (!ready || !deployment || !address) return [];
-    return pools.flatMap((p) => [
-      { address: deployment.binBook, abi: binBookAbi, functionName: "getShares", args: [p.poolId, address] },
-      { address: deployment.binBook, abi: binBookAbi, functionName: "getTotalShares", args: [p.poolId] },
-      { address: deployment.binBook, abi: binBookAbi, functionName: "pendingFees", args: [p.poolId, address] },
-      { address: deployment.binBook, abi: binBookAbi, functionName: "books", args: [p.poolId] },
-    ] as const);
+    return pools.flatMap(
+      (p) =>
+        [
+          {
+            address: deployment.binBook,
+            abi: binBookAbi,
+            functionName: "getShares",
+            args: [p.poolId, address],
+          },
+          {
+            address: deployment.binBook,
+            abi: binBookAbi,
+            functionName: "getTotalShares",
+            args: [p.poolId],
+          },
+          {
+            address: deployment.binBook,
+            abi: binBookAbi,
+            functionName: "pendingFees",
+            args: [p.poolId, address],
+          },
+          { address: deployment.binBook, abi: binBookAbi, functionName: "books", args: [p.poolId] },
+          {
+            address: deployment.binBook,
+            abi: binBookAbi,
+            functionName: "userRanges",
+            args: [p.poolId, address],
+          },
+        ] as const
+    );
   }, [pools, deployment, ready, address]);
 
   const q = useReadContracts({
@@ -50,14 +81,18 @@ export function usePositions() {
     const out: Position[] = [];
     for (let i = 0; i < pools.length; i++) {
       const p = pools[i]!;
-      const base = i * 4;
+      const base = i * 5;
       const shares = (q.data[base]?.result as bigint | undefined) ?? 0n;
       if (shares === 0n) continue;
       const totalShares = (q.data[base + 1]?.result as bigint | undefined) ?? 0n;
       const fees = q.data[base + 2]?.result as readonly [bigint, bigint] | undefined;
       const book = q.data[base + 3]?.result as
-        | readonly [number, number, number, number, number, number, bigint, boolean]
-        | undefined;
+        readonly [number, number, number, number, number, number, bigint, boolean] | undefined;
+      const range = q.data[base + 4]?.result as readonly [number, number, boolean] | undefined;
+      const hasRange = range?.[2] ?? false;
+      // Inverse of BinLayout.resolveBinRange: tickLower = minB * binSize, tickUpper = (maxB + 1) * binSize.
+      const tickLower = hasRange ? range![0] * p.binSize : 0;
+      const tickUpper = hasRange ? (range![1] + 1) * p.binSize : 0;
       out.push({
         poolId: p.poolId,
         key: p.key,
@@ -69,6 +104,9 @@ export function usePositions() {
         fee1: fees?.[1] ?? 0n,
         sqrtPriceX96: book?.[6] ?? 0n,
         currentBin: book?.[3] ?? 0,
+        tickLower,
+        tickUpper,
+        hasRange,
       });
     }
     return out;

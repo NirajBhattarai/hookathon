@@ -126,7 +126,7 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,, , uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
+        (int24 storedBinSize,,,,,, uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
         assertEq(storedSqrtPriceX96, Constants.SQRT_PRICE_1_1, "starting sqrtPriceX96 stored as requested");
         assertFalse(seeded);
@@ -150,7 +150,7 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, Constants.SQRT_PRICE_1_1, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,, , uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
+        (int24 storedBinSize,,,,,, uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
         assertEq(storedSqrtPriceX96, Constants.SQRT_PRICE_1_1, "starting sqrtPriceX96 stored as requested");
         assertFalse(seeded);
@@ -166,7 +166,7 @@ contract BinBookCreatePoolTest is BaseTest {
         hook.createPool(key, sqrtPriceX96, binSize);
 
         PoolId id = key.toId();
-        (int24 storedBinSize,,,,, , uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
+        (int24 storedBinSize,,,,,, uint160 storedSqrtPriceX96, bool seeded) = hook.books(id);
         assertEq(storedBinSize, binSize);
         assertEq(storedSqrtPriceX96, sqrtPriceX96, "starting sqrtPriceX96 stored as requested");
         assertFalse(seeded);
@@ -233,9 +233,8 @@ contract BinBookCreatePoolTest is BaseTest {
         (Currency currency0, Currency currency1) =
             currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
 
-        PoolKey memory key = PoolKey({
-            currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(0))
-        });
+        PoolKey memory key =
+            PoolKey({currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(0))});
 
         vm.expectRevert(BinBook.InvalidHook.selector);
         hook.createPool(key, Constants.SQRT_PRICE_1_1, 10);

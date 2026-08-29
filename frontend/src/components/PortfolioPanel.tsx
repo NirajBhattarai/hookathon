@@ -22,7 +22,9 @@ function fmtAmount(raw: bigint, decimals?: number): string {
   if (decimals === undefined) return "—";
   const v = Number(formatUnits(raw, decimals));
   if (v === 0) return "0";
-  return v < 0.0001 ? v.toExponential(2) : v.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  return v < 0.0001
+    ? v.toExponential(2)
+    : v.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
 
 function PositionCard({ position, onChanged }: { position: Position; onChanged: () => void }) {
@@ -79,7 +81,7 @@ function PositionCard({ position, onChanged }: { position: Position; onChanged: 
   }
 
   async function remove() {
-    if (!deployment) return;
+    if (!deployment || !position.hasRange) return;
     const amount = (position.shares * BigInt(pct)) / 100n;
     if (amount === 0n) return;
     await run("Remove Liquidity", `${pct}% of your position`, () =>
@@ -94,8 +96,11 @@ function PositionCard({ position, onChanged }: { position: Position; onChanged: 
             amount0Min: 0n,
             amount1Min: 0n,
             deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
-            tickLower: 0,
-            tickUpper: 0,
+            // removeLiquidity now scopes redemption to this exact range instead of a pool-wide
+            // slice — see BinBook._decreaseUserLInRange. This is the caller's own tracked range
+            // (userRanges), read via usePositions/usePairPosition.
+            tickLower: position.tickLower,
+            tickUpper: position.tickUpper,
             userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
           },
         ],
@@ -126,7 +131,9 @@ function PositionCard({ position, onChanged }: { position: Position; onChanged: 
             </strong>
             <span className="muted tiny">
               Bin size {position.binSize}
-              {price !== null ? ` · 1 ${base.symbol ?? "tok0"} = ${formatPriceHuman(price)} ${quote.symbol ?? "tok1"}` : ""}
+              {price !== null
+                ? ` · 1 ${base.symbol ?? "tok0"} = ${formatPriceHuman(price)} ${quote.symbol ?? "tok1"}`
+                : ""}
             </span>
           </div>
         </div>
@@ -250,7 +257,8 @@ export function PortfolioPanel() {
   }, [deployment, baseAddr, quoteAddr]);
 
   const pair = baseAddr && quoteAddr ? { token0: baseAddr, token1: quoteAddr } : undefined;
-  const pairInvalid = !!baseAddr && !!quoteAddr && baseAddr.toLowerCase() === quoteAddr.toLowerCase();
+  const pairInvalid =
+    !!baseAddr && !!quoteAddr && baseAddr.toLowerCase() === quoteAddr.toLowerCase();
 
   function selectAt(slot: "base" | "quote", a: Address) {
     if (slot === "base") {
@@ -289,10 +297,23 @@ export function PortfolioPanel() {
       });
     }
     return out;
-  }, [deployment?.token0, deployment?.token1, defBase.symbol, defBase.decimals, defBase.color, defQuote.symbol, defQuote.decimals, defQuote.color]);
+  }, [
+    deployment?.token0,
+    deployment?.token1,
+    defBase.symbol,
+    defBase.decimals,
+    defBase.color,
+    defQuote.symbol,
+    defQuote.decimals,
+    defQuote.color,
+  ]);
 
   const { poolId: selectedPoolId } = usePool(pair);
-  const { position: selected, isLoading: selectedLoading, refetch: refetchSelected } = usePairPosition(pair);
+  const {
+    position: selected,
+    isLoading: selectedLoading,
+    refetch: refetchSelected,
+  } = usePairPosition(pair);
   const others = positions.filter((p) => p.poolId !== selectedPoolId);
 
   function refetchAll() {
@@ -304,8 +325,8 @@ export function PortfolioPanel() {
     <div className="page-wrap portfolio-wrap">
       <h1 className="page-title">Portfolio</h1>
       <p className="page-sub">
-        Read straight from the chain — no backend, no indexer. Pick a pair to manage it directly,
-        or claim fees and pull liquidity from any position below.
+        Read straight from the chain — no backend, no indexer. Pick a pair to manage it directly, or
+        claim fees and pull liquidity from any position below.
       </p>
 
       <div className="console-topbar">
@@ -316,7 +337,11 @@ export function PortfolioPanel() {
           align="left"
         />
         <span className="muted">/</span>
-        <TokenSelect value={quoteAddr ?? deployment?.token1 ?? ZERO_ADDRESS} onSelect={(a) => selectAt("quote", a)} extraTokens={extraTokens} />
+        <TokenSelect
+          value={quoteAddr ?? deployment?.token1 ?? ZERO_ADDRESS}
+          onSelect={(a) => selectAt("quote", a)}
+          extraTokens={extraTokens}
+        />
         <span className="console-topbar-spacer" />
         {isConnected && !pairInvalid && !selectedLoading && (
           <span className={selected ? "pool-status ok" : "pool-status warn"}>
@@ -347,33 +372,35 @@ export function PortfolioPanel() {
           ) : (
             <div className="form-card portfolio-empty">
               <p className="muted">No position in this pair yet.</p>
-              <Link href="/liquidity" className="cta" style={{ display: "inline-block", width: "auto", padding: "0.75rem 1.5rem" }}>
+              <Link
+                href="/liquidity"
+                className="cta"
+                style={{ display: "inline-block", width: "auto", padding: "0.75rem 1.5rem" }}
+              >
                 Add liquidity
               </Link>
             </div>
           )}
 
-          {isLoading ? (
-            others.length === 0 && (
-              <>
-                <h2 className="portfolio-subhead">Other positions</h2>
-                <div className="positions-grid">
-                  <PositionSkeleton />
-                </div>
-              </>
-            )
-          ) : (
-            others.length > 0 && (
-              <>
-                <h2 className="portfolio-subhead">Other positions</h2>
-                <div className="positions-grid">
-                  {others.map((p) => (
-                    <PositionCard key={p.poolId} position={p} onChanged={refetchAll} />
-                  ))}
-                </div>
-              </>
-            )
-          )}
+          {isLoading
+            ? others.length === 0 && (
+                <>
+                  <h2 className="portfolio-subhead">Other positions</h2>
+                  <div className="positions-grid">
+                    <PositionSkeleton />
+                  </div>
+                </>
+              )
+            : others.length > 0 && (
+                <>
+                  <h2 className="portfolio-subhead">Other positions</h2>
+                  <div className="positions-grid">
+                    {others.map((p) => (
+                      <PositionCard key={p.poolId} position={p} onChanged={refetchAll} />
+                    ))}
+                  </div>
+                </>
+              )}
         </>
       )}
     </div>

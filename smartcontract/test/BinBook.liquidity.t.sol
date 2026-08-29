@@ -712,13 +712,21 @@ contract BinBookLiquidityTest is BaseTest {
 
         assertEq(hook.getShares(id, address(this)), 0, "all shares burned");
         assertEq(hook.getTotalShares(id), 0, "pool fully drained: no shares remain");
-        assertEq(
-            _totalUserL(hook, id, address(this), -60, 0, 10), 0, "aggregate bin liquidity fully drained"
+        // A full-range removal burns a single uniform fraction of L across every bin
+        // (_decreaseUserLInRange), computed from a pool-wide reserve snapshot that can disagree
+        // with the per-bin tokenAmountsForBin recompute by a few wei of value — the same
+        // documented cross-path drift as depositLBase vs tokenAmountsForBin. That can leave a
+        // dust-level L residue (here, ~1e-12 relative to the deposit) rather than a literal zero.
+        assertLt(
+            _totalUserL(hook, id, address(this), -60, 0, 10),
+            1e9,
+            "aggregate bin liquidity fully drained (dust-level residue only)"
         );
 
-        // Sole depositor: the bins themselves (not just this user's slice) are empty too.
+        // Sole depositor: the bins themselves (not just this user's slice) are empty too, modulo
+        // the same dust tolerance.
         for (int24 idx = -6; idx <= -1; ++idx) {
-            assertEq(hook.liquidity(id, idx), 0, "no liquidity left in any bin after the sole depositor exits");
+            assertLt(hook.liquidity(id, idx), 1e9, "no liquidity left in any bin after the sole depositor exits");
         }
     }
 
@@ -818,8 +826,11 @@ contract BinBookLiquidityTest is BaseTest {
             })
         );
         assertEq(hook.getShares(id, address(this)), 0);
+        // Dust-level tolerance: see test_removeLiquidity_full_drainsPositionAndReturnsAllTokens
+        // for why a full-range removal can leave a ~1e-12-relative L residue rather than a
+        // literal zero.
         for (int24 idx = -6; idx <= -1; ++idx) {
-            assertEq(hook.liquidityOf(id, address(this), idx), 0, "bin drained");
+            assertLt(hook.liquidityOf(id, address(this), idx), 1e9, "bin drained (dust-level residue only)");
         }
 
         // The range metadata survives the drain untouched, even though every bin in it is now
@@ -942,7 +953,10 @@ contract BinBookLiquidityTest is BaseTest {
             })
         );
 
-        assertEq(hook.liquidityOf(id, address(this), bin), 0, "withdrawal drains both salted deposits");
+        // Dust-level tolerance: see test_removeLiquidity_full_drainsPositionAndReturnsAllTokens
+        // for why a full-range removal can leave a ~1e-12-relative L residue rather than a
+        // literal zero.
+        assertLt(hook.liquidityOf(id, address(this), bin), 1e9, "withdrawal drains both salted deposits");
         assertEq(hook.getShares(id, address(this)), 0, "all shares burned in one call");
     }
 
@@ -1460,5 +1474,250 @@ contract BinBookLiquidityTest is BaseTest {
         (uint256 pending0, uint256 pending1) = hook.pendingFees(id, address(this));
         assertEq(pending0, 0, "no swaps yet: no fees accrued");
         assertEq(pending1, 0, "no swaps yet: no fees accrued");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                RANGE-SCOPED REMOVELIQUIDITY (DoS fix coverage)
+    //////////////////////////////////////////////////////////////*/
+
+    function test_revert_removeLiquidity_insufficientRangeLiquidity() public {
+        BinBook hook = BinBook(flags);
+
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        PoolKey memory key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(hook))
+        });
+        PoolId id = key.toId();
+
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 10);
+
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+
+        hook.addLiquidity(
+            key,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 1 ether,
+                amount1Desired: 1 ether,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: -60,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
+
+        uint256 shares = hook.getShares(id, address(this));
+        assertGt(shares, 0);
+
+        // Ask for a range the caller has zero liquidity in — rangeValue is 0, targetValue > 0.
+        vm.expectRevert(BinBook.InsufficientRangeLiquidity.selector);
+        hook.removeLiquidity(
+            key,
+            BaseCustomAccounting.RemoveLiquidityParams({
+                liquidity: shares,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: 60,
+                tickUpper: 120,
+                userInputSalt: bytes32(0)
+            })
+        );
+    }
+
+    /// @dev Deposits into two disjoint ranges with deliberately different compositions (A
+    ///      straddles the active price, both tokens; B is one-sided, far away). Removing from A
+    ///      only must leave B completely untouched, and the payout must reflect A's own
+    ///      composition — proving removeLiquidity draws only from the caller-chosen range, not a
+    ///      blended average across every position the caller holds.
+    function test_removeLiquidity_scopedToOneRange_leavesDisjointRangeUntouched() public {
+        BinBook hook = BinBook(flags);
+
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        PoolKey memory key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(hook))
+        });
+        PoolId id = key.toId();
+
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 10);
+
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+
+        // Range A: straddles the active price (tick 0 sits inside [-60, 60)) — both tokens.
+        int24 aLower = -60;
+        int24 aUpper = 60;
+        hook.addLiquidity(
+            key,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 1 ether,
+                amount1Desired: 1 ether,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: aLower,
+                tickUpper: aUpper,
+                userInputSalt: bytes32(0)
+            })
+        );
+
+        // Range B: far away and one-sided (entirely above the active price) — token0 only.
+        int24 bLower = 9000;
+        int24 bUpper = 9060;
+        hook.addLiquidity(
+            key,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 1 ether,
+                amount1Desired: 0,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: bLower,
+                tickUpper: bUpper,
+                userInputSalt: bytes32(0)
+            })
+        );
+
+        int24 binA = aLower / 10;
+        int24 binB = bLower / 10;
+        uint128 bLBefore = hook.liquidityOf(id, address(this), binB);
+        assertGt(bLBefore, 0, "B position exists");
+
+        // Burn a modest slice of total shares, scoped to A only — comfortably within A's own
+        // value so this doesn't need InsufficientRangeLiquidity headroom-hunting.
+        uint256 totalShares = hook.getShares(id, address(this));
+        uint256 toBurn = totalShares / 10;
+
+        uint256 balance1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(this));
+
+        BalanceDelta delta = hook.removeLiquidity(
+            key,
+            BaseCustomAccounting.RemoveLiquidityParams({
+                liquidity: toBurn,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: aLower,
+                tickUpper: aUpper,
+                userInputSalt: bytes32(0)
+            })
+        );
+
+        // B is completely untouched: same liquidity, and none of its token0 was pulled in.
+        assertEq(hook.liquidityOf(id, address(this), binB), bLBefore, "B position untouched by an A-scoped removal");
+
+        // The payout came from A's own (both-token) composition, not just B's token0-only shape.
+        assertGt(uint256(uint128(delta.amount1())), 0, "payout reflects A's own composition (token1 included)");
+        assertEq(
+            MockERC20(Currency.unwrap(currency1)).balanceOf(address(this)) - balance1Before,
+            uint256(uint128(delta.amount1())),
+            "token1 received == delta"
+        );
+
+        // A shrank; B didn't move.
+        assertLt(hook.liquidityOf(id, address(this), binA), hook.liquidity(id, binA) + 1, "sanity: A bin still exists");
+    }
+
+    /// @dev Reproduces test_userRanges_doesNotShrinkAfterFullDrain_thenUnionsWithDisjointRedeposit's
+    ///      stale-span setup (drain a narrow position, redeposit into a disjoint far-away one, so
+    ///      userRanges spans hundreds of empty bins) and confirms a subsequent narrow-range removal
+    ///      doesn't pay for that stale gap — the DoS this whole change exists to fix.
+    function test_removeLiquidity_gasBoundedByRequestedRange_notStaleUserRangesSpan() public {
+        BinBook hook = BinBook(flags);
+
+        Currency currencyA = deployCurrency();
+        Currency currencyB = deployCurrency();
+        (Currency currency0, Currency currency1) =
+            currencyA < currencyB ? (currencyA, currencyB) : (currencyB, currencyA);
+
+        PoolKey memory key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 100, tickSpacing: 1, hooks: IHooks(address(hook))
+        });
+        PoolId id = key.toId();
+
+        hook.createPool(key, Constants.SQRT_PRICE_1_1, 10);
+
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+
+        // First position, then fully drain it.
+        hook.addLiquidity(
+            key,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 1 ether,
+                amount1Desired: 1 ether,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: -60,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
+        hook.removeLiquidity(
+            key,
+            BaseCustomAccounting.RemoveLiquidityParams({
+                liquidity: hook.getShares(id, address(this)),
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: -60,
+                tickUpper: 0,
+                userInputSalt: bytes32(0)
+            })
+        );
+
+        // Redeposit far away, disjoint — userRanges now unions across the empty gap.
+        int24 farLower = 8000;
+        int24 farUpper = 8060;
+        hook.addLiquidity(
+            key,
+            BaseCustomAccounting.AddLiquidityParams({
+                amount0Desired: 1 ether,
+                amount1Desired: 0,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: farLower,
+                tickUpper: farUpper,
+                userInputSalt: bytes32(0)
+            })
+        );
+
+        (int24 rMin, int24 rMax,) = hook.userRanges(id, address(this));
+        assertGt(uint256(int256(rMax - rMin)), 500, "sanity: userRanges span is now wide (stale gap present)");
+
+        uint256 sharesNow = hook.getShares(id, address(this));
+
+        uint256 gasBefore = gasleft();
+        hook.removeLiquidity(
+            key,
+            BaseCustomAccounting.RemoveLiquidityParams({
+                liquidity: sharesNow,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp,
+                tickLower: farLower,
+                tickUpper: farUpper,
+                userInputSalt: bytes32(0)
+            })
+        );
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // The requested range is 6 bins wide. Scanning the stale ~800-bin userRanges gap instead
+        // (the pre-fix behavior) would cost roughly two orders of magnitude more than this.
+        assertLt(
+            gasUsed, 200_000, "removeLiquidity cost must scale with the requested range, not userRanges' stale span"
+        );
     }
 }

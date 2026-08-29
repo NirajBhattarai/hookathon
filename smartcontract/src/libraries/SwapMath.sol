@@ -315,8 +315,7 @@ library SwapMath {
         uint160 sqrtPriceX96,
         uint256 totalSupply
     ) internal pure returns (uint256 shares) {
-        uint256 priceX96 = FullMath.mulDiv(sqrtPriceX96, sqrtPriceX96, Q96);
-        uint256 depositValue = amount0 + FullMath.mulDiv(amount1, Q96, priceX96);
+        uint256 depositValue = valueOf(amount0, amount1, sqrtPriceX96);
 
         if (totalSupply == 0) {
             // Bootstrap: no existing value to compare against, so this deposit necessarily sets
@@ -324,8 +323,17 @@ library SwapMath {
             return depositValue;
         }
 
-        uint256 totalValueBefore = reserve0 + FullMath.mulDiv(reserve1, Q96, priceX96);
+        uint256 totalValueBefore = valueOf(reserve0, reserve1, sqrtPriceX96);
         shares = FullMath.mulDiv(depositValue, totalSupply, totalValueBefore);
+    }
+
+    /// @notice Converts amount0/amount1 into token0-equivalent value at `sqrtPriceX96`.
+    /// @dev Shared by `getMintShares` and BinBook's removeLiquidity value-target formula, so
+    ///      minting and burning price a position with the exact same formula — no drift between
+    ///      the two directions.
+    function valueOf(uint256 amount0, uint256 amount1, uint160 sqrtPriceX96) internal pure returns (uint256) {
+        uint256 priceX96 = FullMath.mulDiv(sqrtPriceX96, sqrtPriceX96, Q96);
+        return amount0 + FullMath.mulDiv(amount1, Q96, priceX96);
     }
 
     // ── private ──────────────────────────────────────────────────────────
