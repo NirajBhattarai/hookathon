@@ -2,6 +2,8 @@
 
 **A hook-owned, discretized liquidity book for Uniswap v4.**
 
+📒 **[Interactive docs — architecture walkthrough + live sandwich-resistance data ↗](https://claude.ai/code/artifact/e42cca39-9f49-4eed-b74c-d30cceac78da)**
+
 BinBook replaces v4's native tick-range positions with a simpler model: liquidity is bucketed
 into fixed-width **bins** around the active price, sized by a **linear-decay** ramp (more
 liquidity near the current price, tapering out toward the edges — similar in spirit to Trader
