@@ -179,6 +179,41 @@ library SwapMath {
         return (a.amountOut, a.amountInUsed, a.feeAmount, a.sqrtEnd, a.endIndex);
     }
 
+    /// @notice Exact-out walk across `bins`, mirroring Pool.swap's tick loop for positive
+    ///         `amountSpecified`. Each iteration runs computeSwapStep and consumes `amountOut`
+    ///         from the remaining output budget until it is exhausted or the book edge is hit.
+    /// @param amountOut Desired output amount (gross tokens received by the trader)
+    /// @return amountOutUsed Total output delivered across all steps (equals `amountOut` on success)
+    /// @return amountInUsed Total gross input consumed across all steps (net inputs + fees)
+    function swapExactOutMulti(
+        Bin[] memory bins,
+        uint160 sqrtP,
+        uint256 active,
+        uint256 amountOut,
+        bool zeroForOne,
+        uint256 lo,
+        uint256 hi,
+        uint24 feePips
+    )
+        internal
+        pure
+        returns (uint256 amountOutUsed, uint256 amountInUsed, uint256 feeAmount, uint160 sqrtEnd, uint256 endIndex)
+    {
+        if (bins.length == 0 || amountOut == 0) {
+            return (0, 0, 0, sqrtP, active);
+        }
+
+        WalkState memory a;
+        a.sqrtEnd = sqrtP;
+        a.endIndex = active;
+        a.remaining = amountOut;
+
+        if (zeroForOne) _walkDownOut(bins, a, lo, hi, feePips);
+        else _walkUpOut(bins, a, lo, hi, feePips);
+
+        return (a.amountOut, a.amountInUsed, a.feeAmount, a.sqrtEnd, a.endIndex);
+    }
+
     /// @dev Walk from the active bin toward lower prices, mutating `a`.
     function _walkDown(Bin[] memory bins, WalkState memory a, uint256 lo, uint256 hi, uint24 feePips) private pure {
         uint256 last = bins.length - 1;
@@ -222,7 +257,50 @@ library SwapMath {
         }
     }
 
-    /// @dev Box computeSwapStep's tuple into one memory slot.
+    /// @dev Walk from the active bin toward lower prices for an exact-output swap.
+    function _walkDownOut(Bin[] memory bins, WalkState memory a, uint256 lo, uint256 hi, uint24 feePips) private pure {
+        uint256 last = bins.length - 1;
+        uint256 hiC = hi > last ? last : hi;
+        uint256 start = a.endIndex < hiC ? a.endIndex : hiC;
+        if (start < lo) return;
+
+        for (uint256 i = start;;) {
+            CoreStep memory c = _coreStepOut(bins[i], a.sqrtEnd, a.remaining, feePips, true);
+            a.remaining -= c.amountOut;
+            a.amountInUsed += c.amountIn + c.feeAmount;
+            a.amountOut += c.amountOut;
+            a.feeAmount += c.feeAmount;
+            a.sqrtEnd = c.sqrtNext;
+            a.endIndex = i;
+            if (a.remaining == 0 || i == lo) break;
+            unchecked {
+                --i;
+            }
+        }
+    }
+
+    /// @dev Walk from the active bin toward higher prices for an exact-output swap.
+    function _walkUpOut(Bin[] memory bins, WalkState memory a, uint256 lo, uint256 hi, uint24 feePips) private pure {
+        uint256 last = bins.length - 1;
+        uint256 hiC = hi > last ? last : hi;
+        uint256 start = a.endIndex > lo ? a.endIndex : lo;
+
+        for (uint256 i = start; i <= hiC;) {
+            CoreStep memory c = _coreStepOut(bins[i], a.sqrtEnd, a.remaining, feePips, false);
+            a.remaining -= c.amountOut;
+            a.amountInUsed += c.amountIn + c.feeAmount;
+            a.amountOut += c.amountOut;
+            a.feeAmount += c.feeAmount;
+            a.sqrtEnd = c.sqrtNext;
+            a.endIndex = i;
+            if (a.remaining == 0 || i == hiC) break;
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @dev Box computeSwapStep's tuple into one memory slot (exact-in).
     function _coreStep(Bin memory bin, uint160 sqrtP, uint256 remaining, uint24 feePips, bool zeroForOne)
         private
         pure
@@ -230,6 +308,16 @@ library SwapMath {
     {
         (c.sqrtNext, c.amountIn, c.amountOut, c.feeAmount) =
             computeSwapStep(bin, sqrtP, -int256(remaining), feePips, zeroForOne);
+    }
+
+    /// @dev Box computeSwapStep's tuple into one memory slot (exact-out).
+    function _coreStepOut(Bin memory bin, uint160 sqrtP, uint256 remainingOut, uint24 feePips, bool zeroForOne)
+        private
+        pure
+        returns (CoreStep memory c)
+    {
+        (c.sqrtNext, c.amountIn, c.amountOut, c.feeAmount) =
+            computeSwapStep(bin, sqrtP, int256(remainingOut), feePips, zeroForOne);
     }
 
     // ── Linear decay (from LinearDecay) ──────────────────────────────────

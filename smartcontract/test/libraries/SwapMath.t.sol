@@ -303,6 +303,44 @@ contract SwapMathTest is Test {
         assertEq(bFee, s_fee);
     }
 
+    // ── swapExactOutMulti: multi-bin walks ───────────────────────────────
+
+    function test_walkExactOut_twoBins_priceUp_feeZero() public pure {
+        SwapMath.Bin[] memory bins = new SwapMath.Bin[](2);
+        bins[0] = _bin(0, 60);
+        bins[1] = _bin(60, 120);
+
+        uint256 targetOut = SqrtPriceMath.getAmount0Delta(bins[0].sqrtLo, bins[0].sqrtHi, L, false) / 2;
+
+        (uint256 out, uint256 used, uint256 fee, uint160 end, uint256 endIndex) =
+            SwapMath.swapExactOutMulti(bins, bins[0].sqrtLo, 0, targetOut, false, 0, 1, 0);
+
+        assertEq(out, targetOut);
+        assertEq(endIndex, 0);
+        assertGt(end, bins[0].sqrtLo);
+        assertLt(end, bins[0].sqrtHi);
+        assertEq(fee, 0);
+        assertGt(used, 0);
+    }
+
+    function test_walkExactOut_twoBins_priceDown_feeZero() public pure {
+        SwapMath.Bin[] memory bins = new SwapMath.Bin[](2);
+        bins[0] = _bin(0, 60);
+        bins[1] = _bin(60, 120);
+
+        uint256 targetOut = SqrtPriceMath.getAmount1Delta(bins[1].sqrtLo, bins[1].sqrtHi, L, false) / 2;
+
+        (uint256 out, uint256 used, uint256 fee, uint160 end, uint256 endIndex) =
+            SwapMath.swapExactOutMulti(bins, bins[1].sqrtHi, 1, targetOut, true, 0, 1, 0);
+
+        assertEq(out, targetOut);
+        assertEq(endIndex, 1);
+        assertGt(end, bins[1].sqrtLo);
+        assertLt(end, bins[1].sqrtHi);
+        assertEq(fee, 0);
+        assertGt(used, 0);
+    }
+
     // ── swapExactInMulti: multi-bin walks ────────────────────────────────
 
     function test_walk_twoBins_priceUp_feeZero() public pure {

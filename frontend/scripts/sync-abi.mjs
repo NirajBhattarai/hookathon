@@ -10,6 +10,7 @@ const keepFns = new Set([
   'addLiquidity',
   'removeLiquidity',
   'collectFees',
+  'createPool',
   'setBinSize',
   'pendingFees',
   'liquidity',
@@ -20,7 +21,7 @@ const keepFns = new Set([
   'minBin',
   'maxBin',
   'getBinSize',
-  'isConfigured',
+  'initializedPools',
   'sharesOf',
   'getShares',
   'getTotalShares',
@@ -30,11 +31,9 @@ const keepFns = new Set([
   'userRanges',
   'DEFAULT_BINS_PER_SIDE',
   'DEFAULT_RAMP',
-  'MAX_BINS_PER_ADD',
   'MAX_BOOK_BINS',
-  'binSizeSet',
 ])
-const keepEv = new Set(['BinSizeSet', 'BookExpanded', 'FeesCollected'])
+const keepEv = new Set(['BinSizeSet', 'BookExpanded', 'FeesCollected', 'PoolCreated'])
 
 const abi = JSON.parse(await import('node:fs').then((fs) => fs.readFileSync(artifact, 'utf8'))).abi
 const trimmed = abi.filter(

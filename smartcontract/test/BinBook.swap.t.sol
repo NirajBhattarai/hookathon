@@ -102,6 +102,7 @@ contract BinBookSwapTest is BaseTest {
     uint256 internal s_simOut;
     uint256 internal s_simUsed;
     uint256 internal s_simFee;
+    uint256 internal s_simIn;
 
     function _sim(uint256 inAmt, bool zeroForOne) internal {
         (SwapMath.Bin[] memory bins, uint256 active, uint160 sqrtP) = _simulate();
@@ -109,6 +110,15 @@ contract BinBookSwapTest is BaseTest {
             SwapMath.swapExactInMulti(bins, sqrtP, active, inAmt, zeroForOne, 0, bins.length - 1, poolKey.fee);
         s_simOut = out;
         s_simUsed = used;
+        s_simFee = fee;
+    }
+
+    function _simOut(uint256 outAmt, bool zeroForOne) internal {
+        (SwapMath.Bin[] memory bins, uint256 active, uint160 sqrtP) = _simulate();
+        (uint256 out, uint256 used, uint256 fee,,) =
+            SwapMath.swapExactOutMulti(bins, sqrtP, active, outAmt, zeroForOne, 0, bins.length - 1, poolKey.fee);
+        s_simOut = out;
+        s_simIn = used;
         s_simFee = fee;
     }
 
@@ -160,6 +170,62 @@ contract BinBookSwapTest is BaseTest {
         assertEq(s_simUsed, inAmt, "simulation should consume all input");
         assertApproxEqAbs(feesAfter - feesBefore, s_simFee, 10, "LP fee growth ~= summed per-step fees");
         assertGt(hook.currentSqrtPriceX96(poolId), sqrtP0, "price moved up");
+    }
+
+    function test_swap_exactOut_zeroForOne_matchesLibrarySimulation() public {
+        _seed();
+        MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
+        MockERC20 t1 = MockERC20(Currency.unwrap(currency1));
+        uint256 outAmt = 0.5 ether;
+        uint256 sqrtP0 = hook.currentSqrtPriceX96(poolId);
+        uint256 t0Before = t0.balanceOf(address(this));
+        uint256 t1Before = t1.balanceOf(address(this));
+        (uint256 fB0, uint256 fB1) = hook.pendingFees(poolId, address(this));
+        uint256 feesBefore = fB0 + fB1;
+
+        _simOut(outAmt, true);
+        swapRouter.swapTokensForExactTokens(outAmt, type(uint256).max, true, poolKey, "", address(this), block.timestamp);
+
+        (uint256 fA0, uint256 fA1) = hook.pendingFees(poolId, address(this));
+        uint256 feesAfter = fA0 + fA1;
+
+        assertEq(t1.balanceOf(address(this)) - t1Before, outAmt, "trader receives exact output");
+        assertEq(t0.balanceOf(address(this)), t0Before - s_simIn, "input must match simulation exactly");
+        assertEq(s_simOut, outAmt, "simulation should deliver all output");
+        assertApproxEqAbs(feesAfter - feesBefore, s_simFee, 10, "LP fee growth ~= summed per-step fees");
+        assertLt(hook.currentSqrtPriceX96(poolId), sqrtP0, "price moved down");
+    }
+
+    function test_swap_exactOut_oneForZero_matchesLibrarySimulation() public {
+        _seed();
+        MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
+        MockERC20 t1 = MockERC20(Currency.unwrap(currency1));
+        uint256 outAmt = 0.5 ether;
+        uint256 sqrtP0 = hook.currentSqrtPriceX96(poolId);
+        uint256 t0Before = t0.balanceOf(address(this));
+        uint256 t1Before = t1.balanceOf(address(this));
+        (uint256 fB0, uint256 fB1) = hook.pendingFees(poolId, address(this));
+        uint256 feesBefore = fB0 + fB1;
+
+        _simOut(outAmt, false);
+        swapRouter.swapTokensForExactTokens(outAmt, type(uint256).max, false, poolKey, "", address(this), block.timestamp);
+
+        (uint256 fA0, uint256 fA1) = hook.pendingFees(poolId, address(this));
+        uint256 feesAfter = fA0 + fA1;
+
+        assertEq(t0.balanceOf(address(this)) - t0Before, outAmt, "trader receives exact output");
+        assertEq(t1.balanceOf(address(this)), t1Before - s_simIn, "input must match simulation exactly");
+        assertEq(s_simOut, outAmt, "simulation should deliver all output");
+        assertApproxEqAbs(feesAfter - feesBefore, s_simFee, 10, "LP fee growth ~= summed per-step fees");
+        assertGt(hook.currentSqrtPriceX96(poolId), sqrtP0, "price moved up");
+    }
+
+    function test_swap_exactOut_revertsWhenBookTooThin() public {
+        _approve();
+        _add(0.001 ether, 0.001 ether);
+
+        vm.expectRevert();
+        swapRouter.swapTokensForExactTokens(1000 ether, type(uint256).max, true, poolKey, "", address(this), block.timestamp);
     }
 
     function test_swap_throughEmptyGap_matchesLibrarySimulation() public {
