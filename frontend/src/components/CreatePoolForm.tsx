@@ -8,29 +8,6 @@ import { useDeployment } from "@/hooks/useDeployment";
 import { NetworkGate } from "@/components/NetworkGate";
 import { priceToSqrtPriceX96 } from "@/lib/priceMath";
 
-const poolManagerAbi = [
-  {
-    type: "function",
-    name: "initialize",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "key",
-        type: "tuple",
-        components: [
-          { name: "currency0", type: "address" },
-          { name: "currency1", type: "address" },
-          { name: "fee", type: "uint24" },
-          { name: "tickSpacing", type: "int24" },
-          { name: "hooks", type: "address" },
-        ],
-      },
-      { name: "sqrtPriceX96", type: "uint160" },
-    ],
-    outputs: [{ name: "tick", type: "int24" }],
-  },
-] as const;
-
 const erc20Abi = [
   {
     type: "function",
@@ -141,23 +118,16 @@ export function CreatePoolForm() {
     try {
       const sqrtPriceX96 = priceToSqrtPriceX96(price);
 
-      // 1) Initialize Uniswap v4 pool (caller becomes pool creator)
-      await writeContractAsync({
-        address: deployment.poolManager,
-        abi: poolManagerAbi,
-        functionName: "initialize",
-        args: [poolKey, sqrtPriceX96],
-      });
-
-      // 2) Configure bin size on the hook (must be pool creator)
+      // 1) Atomically initialize the v4 pool and lock in its bin size. createPool is the only
+      // valid entry point — calling PoolManager.initialize directly reverts (InitializeViaCreatePool).
       await writeContractAsync({
         address: deployment.binBook,
         abi: binBookAbi,
-        functionName: "setBinSize",
-        args: [poolKey, bs],
+        functionName: "createPool",
+        args: [poolKey, sqrtPriceX96, bs],
       });
 
-      // 3) Optional seed liquidity
+      // 2) Optional seed liquidity
       if (withSeed) {
         const a0 = parseUnits(seed0 || "0", dec0);
         const a1 = parseUnits(seed1 || "0", dec1);

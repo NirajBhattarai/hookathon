@@ -71,7 +71,7 @@ contract BinBook is BaseCustomCurve {
     ///      raw claim balance untrustworthy as the mint/burn value formula's reserve — a donation
     ///      or a sibling pool sharing a currency would silently reprice everyone's shares. These
     ///      mappings instead move only in response to this pool's own operations (see
-    ///      `_getAmountIn`, `_getAmountOut`, `_swapExactIn`, `collectFees`), so they can't be
+    ///      `_getAmountIn`, `_getAmountOut`, `_swapExactIn`, `_swapExactOut`, `collectFees`), so they can't be
     ///      inflated or contaminated from outside this pool.
     mapping(PoolId poolId => uint256) public poolReserve0;
     mapping(PoolId poolId => uint256) public poolReserve1;
@@ -104,7 +104,6 @@ contract BinBook is BaseCustomCurve {
     //////////////////////////////////////////////////////////////*/
 
     error InvalidBinSize();
-    error ExactOutputNotSupported();
     error ZeroAmounts();
     error InsufficientShares();
     error InitializeViaCreatePool();
@@ -241,10 +240,15 @@ contract BinBook is BaseCustomCurve {
         override
         returns (uint256 unspecifiedAmount)
     {
-        if (params.amountSpecified >= 0) revert ExactOutputNotSupported();
         PoolId id = key.toId();
         if (!books[id].seeded) revert SwapMath.InsufficientLiquidity();
-        unspecifiedAmount = _swapExactIn(key, uint256(-params.amountSpecified), params.zeroForOne);
+        if (params.amountSpecified < 0) {
+            unspecifiedAmount = _swapExactIn(key, uint256(-params.amountSpecified), params.zeroForOne);
+        } else if (params.amountSpecified > 0) {
+            unspecifiedAmount = _swapExactOut(key, uint256(params.amountSpecified), params.zeroForOne);
+        } else {
+            revert SwapMath.InsufficientLiquidity();
+        }
     }
 
     function _getSwapFeeAmount(PoolKey calldata key, SwapParams calldata, uint256)
@@ -474,6 +478,68 @@ contract BinBook is BaseCustomCurve {
         }
     }
 
+    /// @notice Exact-out swap walking the book with Uniswap-style per-step fees.
+    /// @dev Each step runs SwapMath.computeSwapStep with positive `amountRemaining`; returns the
+    ///      gross input (principal + fees) required to deliver `amountOut`.
+    function _swapExactOut(PoolKey calldata key, uint256 amountOut, bool zeroForOne)
+        internal
+        returns (uint256 amountIn)
+    {
+        PoolId id = key.toId();
+        BinLayout.Book storage b = books[id];
+
+        (SwapMath.Bin[] memory bins, uint256 active) = _loadBins(id);
+        if (bins.length == 0) revert SwapMath.InsufficientLiquidity();
+
+        WalkCtx memory w;
+        w.remaining = amountOut;
+        w.sqrtEnd = b.sqrtPriceX96;
+        w.endIndex = active;
+
+        if (zeroForOne) {
+            for (uint256 i = active;;) {
+                SwapMath.CoreStep memory c = _computeCoreStepOut(bins[i], w.sqrtEnd, w.remaining, key.fee, true);
+                w.remaining -= c.amountOut;
+                amountIn += c.amountIn + c.feeAmount;
+                w.feeTotal += c.feeAmount;
+                w.sqrtEnd = c.sqrtNext;
+                w.endIndex = i;
+                _accrueFee(id, b.minBin + int24(int256(i)), c.feeAmount, true);
+                if (w.remaining == 0 || i == 0) break;
+                unchecked {
+                    --i;
+                }
+            }
+        } else {
+            uint256 last = bins.length - 1;
+            for (uint256 i = active; i <= last;) {
+                SwapMath.CoreStep memory c = _computeCoreStepOut(bins[i], w.sqrtEnd, w.remaining, key.fee, false);
+                w.remaining -= c.amountOut;
+                amountIn += c.amountIn + c.feeAmount;
+                w.feeTotal += c.feeAmount;
+                w.sqrtEnd = c.sqrtNext;
+                w.endIndex = i;
+                _accrueFee(id, b.minBin + int24(int256(i)), c.feeAmount, false);
+                if (w.remaining == 0 || i == last) break;
+                unchecked {
+                    ++i;
+                }
+            }
+        }
+
+        if (w.remaining > 0) revert SwapMath.InsufficientLiquidity();
+        _lastSwapFee[id] = w.feeTotal;
+        _commitSwap(id, w.sqrtEnd, w.endIndex);
+
+        if (zeroForOne) {
+            poolReserve0[id] += amountIn;
+            poolReserve1[id] -= amountOut;
+        } else {
+            poolReserve1[id] += amountIn;
+            poolReserve0[id] -= amountOut;
+        }
+    }
+
     /// @dev Box computeSwapStep's tuple into one memory slot (stack-too-deep hygiene).
     function _computeCoreStep(
         SwapMath.Bin memory bin,
@@ -484,6 +550,18 @@ contract BinBook is BaseCustomCurve {
     ) private pure returns (SwapMath.CoreStep memory c) {
         (c.sqrtNext, c.amountIn, c.amountOut, c.feeAmount) =
             SwapMath.computeSwapStep(bin, sqrtP, -int256(remaining), feePips, zeroForOne);
+    }
+
+    /// @dev Exact-out variant of `_computeCoreStep`.
+    function _computeCoreStepOut(
+        SwapMath.Bin memory bin,
+        uint160 sqrtP,
+        uint256 remainingOut,
+        uint24 feePips,
+        bool zeroForOne
+    ) private pure returns (SwapMath.CoreStep memory c) {
+        (c.sqrtNext, c.amountIn, c.amountOut, c.feeAmount) =
+            SwapMath.computeSwapStep(bin, sqrtP, int256(remainingOut), feePips, zeroForOne);
     }
 
     function _commitSwap(PoolId id, uint160 sqrtEnd, uint256 endIndex) internal {
