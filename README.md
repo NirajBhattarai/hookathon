@@ -2,7 +2,9 @@
 
 **A hook-owned, discretized liquidity book for Uniswap v4.**
 
-📒 **[Interactive docs — architecture walkthrough + live sandwich-resistance data ↗](https://claude.ai/code/artifact/e42cca39-9f49-4eed-b74c-d30cceac78da)**
+📒 An animated architecture walkthrough with live sandwich-resistance data lives at **`/docs`** in
+the frontend app — run it locally (`cd frontend && npm install && npm run dev`, then visit
+[localhost:3000/docs](http://localhost:3000/docs)) or on wherever you deploy it.
 
 BinBook replaces v4's native tick-range positions with a simpler model: liquidity is bucketed
 into fixed-width **bins** around the active price, sized by a **linear-decay** ramp (more
