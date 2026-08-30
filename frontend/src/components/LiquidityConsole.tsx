@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { formatUnits, parseUnits, type Address } from "viem";
+import { formatUnits, maxUint256, parseUnits, type Address } from "viem";
 import { useAccount, useReadContracts, useWriteContract } from "wagmi";
 import { binBookAbi } from "@/lib/abi/binBook";
 import { StatsBar } from "@/components/StatsBar";
@@ -40,6 +40,16 @@ const erc20Abi = [
     name: "balanceOf",
     stateMutability: "view",
     inputs: [{ name: "", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "allowance",
+    stateMutability: "view",
+    inputs: [
+      { name: "", type: "address" },
+      { name: "", type: "address" },
+    ],
     outputs: [{ name: "", type: "uint256" }],
   },
 ] as const;
@@ -306,6 +316,29 @@ export function LiquidityConsole() {
   const bal0 = balQ.data?.[0]?.result as bigint | undefined;
   const bal1 = balQ.data?.[1]?.result as bigint | undefined;
 
+  const allowQ = useReadContracts({
+    query: { enabled: !!key && !!address && !!deployment },
+    contracts:
+      key && address && deployment
+        ? [
+            {
+              address: key.currency0,
+              abi: erc20Abi,
+              functionName: "allowance",
+              args: [address, deployment.binBook],
+            },
+            {
+              address: key.currency1,
+              abi: erc20Abi,
+              functionName: "allowance",
+              args: [address, deployment.binBook],
+            },
+          ]
+        : [],
+  });
+  const allowance0 = (allowQ.data?.[0]?.result as bigint | undefined) ?? 0n;
+  const allowance1 = (allowQ.data?.[1]?.result as bigint | undefined) ?? 0n;
+
   function applyShape(next: Shape) {
     setShape(next);
     setRangeStart(null);
@@ -372,15 +405,15 @@ export function LiquidityConsole() {
 
     const a0 = parseUnits(amount0 || "0", dec0);
     const a1 = parseUnits(amount1 || "0", dec1);
-    const hasApproval0 = a0 > 0n;
-    const hasApproval1 = a1 > 0n;
+    const needsApproval0 = a0 > 0n && allowance0 < a0;
+    const needsApproval1 = a1 > 0n && allowance1 < a1;
 
     const allSteps: TxStep[] = [];
     if (needsCreate) {
       allSteps.push({ label: "Create pool", done: false });
     }
-    if (hasApproval0) allSteps.push({ label: `Approve ${base.symbol}`, done: false });
-    if (hasApproval1) allSteps.push({ label: `Approve ${quote.symbol}`, done: false });
+    if (needsApproval0) allSteps.push({ label: `Approve ${base.symbol}`, done: false });
+    if (needsApproval1) allSteps.push({ label: `Approve ${quote.symbol}`, done: false });
     allSteps.push({ label: "Add liquidity", done: false });
     setTxSteps(allSteps);
 
@@ -434,21 +467,21 @@ export function LiquidityConsole() {
         });
       }
 
-      if (hasApproval0) {
+      if (needsApproval0) {
         await sendAndConfirm({
           address: key.currency0,
           abi: erc20Abi,
           functionName: "approve",
-          args: [deployment.binBook, a0],
+          args: [deployment.binBook, maxUint256],
           gas: 100_000n,
         });
       }
-      if (hasApproval1) {
+      if (needsApproval1) {
         await sendAndConfirm({
           address: key.currency1,
           abi: erc20Abi,
           functionName: "approve",
-          args: [deployment.binBook, a1],
+          args: [deployment.binBook, maxUint256],
           gas: 100_000n,
         });
       }

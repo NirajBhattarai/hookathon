@@ -357,7 +357,7 @@ export function SwapForm() {
   // ERC20 allowance of the swap router for tokenIn
   // (router04 poolKey-mode pulls input via plain transferFrom, NOT Permit2)
   const allowQ = useReadContracts({
-    query: { enabled: !!payToken && !!deployment },
+    query: { enabled: !!payToken && !!deployment && !!address },
     contracts: [
       {
         address: payToken!,
