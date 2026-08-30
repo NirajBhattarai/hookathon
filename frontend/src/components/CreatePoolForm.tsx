@@ -7,6 +7,7 @@ import { binBookAbi } from "@/lib/abi/binBook";
 import { useDeployment } from "@/hooks/useDeployment";
 import { NetworkGate } from "@/components/NetworkGate";
 import { priceToSqrtPriceX96 } from "@/lib/priceMath";
+import { binAtTick, tickAtBin, DEFAULT_BINS_PER_SIDE } from "@/lib/bins";
 
 const erc20Abi = [
   {
@@ -154,6 +155,15 @@ export function CreatePoolForm() {
           });
         }
         if (amount0 > 0n || amount1 > 0n) {
+          // Contract rejects tickLower >= tickUpper (no 0/0 "auto" sentinel). Mirror
+          // LiquidityConsole / createPool defaults: curBin ± DEFAULT_BINS_PER_SIDE.
+          const curBin = binAtTick(
+            Math.round(Math.log(price) / Math.log(1.0001)),
+            bs
+          );
+          const tickLower = tickAtBin(curBin - DEFAULT_BINS_PER_SIDE, bs);
+          const tickUpper = tickAtBin(curBin + DEFAULT_BINS_PER_SIDE, bs);
+
           await writeContractAsync({
             address: deployment.binBook,
             abi: binBookAbi,
@@ -166,8 +176,8 @@ export function CreatePoolForm() {
                 amount0Min: 0n,
                 amount1Min: 0n,
                 deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower,
+                tickUpper,
                 userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
               },
             ],
