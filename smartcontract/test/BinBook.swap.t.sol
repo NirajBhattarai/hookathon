@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -256,6 +257,77 @@ contract BinBookSwapTest is BaseTest {
 
         vm.expectRevert();
         swapRouter.swapExactTokensForTokens(1000 ether, 0, true, poolKey, "", address(this), block.timestamp);
+    }
+
+    // ── edge cases ───────────────────────────────────────────────────────
+
+    function test_swap_revertsOnUnseededPool() public {
+        // Pool created but never seeded with liquidity: books[id].seeded is false.
+        // PoolManager wraps the hook's revert, so match on any revert rather than the selector.
+        _approve();
+        vm.expectRevert();
+        swapRouter.swapExactTokensForTokens(1 ether, 0, true, poolKey, "", address(this), block.timestamp);
+    }
+
+    function test_swap_revertsOnZeroAmountSpecified() public {
+        // PoolManager itself rejects amountSpecified == 0 before any hook callback runs, so
+        // this never reaches BinBook's own (dead) zero-amount branch in _getUnspecifiedAmount.
+        _seed();
+        vm.expectRevert(IPoolManager.SwapAmountCannotBeZero.selector);
+        swapRouter.swap(int256(0), 0, true, poolKey, "", address(this), block.timestamp);
+    }
+
+    function test_swap_revertsWhenRequestedOutputExceedsEntireBookDepth() public {
+        // Deep liquidity, but confined to a narrow, finite range: [-120, 120] is only 4 bins.
+        // A request for far more output than the whole range can ever produce must revert once
+        // the walk exhausts the last bin, not just run thin partway through one bin.
+        _approve();
+        _addRange(500 ether, 500 ether, -120, 120);
+
+        vm.expectRevert();
+        swapRouter.swapTokensForExactTokens(
+            100_000 ether, type(uint256).max, true, poolKey, "", address(this), block.timestamp
+        );
+    }
+
+    // ── fuzzing ──────────────────────────────────────────────────────────
+
+    function testFuzz_swap_matchesLibrarySimulation(uint256 amountSeed, bool zeroForOne, bool exactOut) public {
+        _seed();
+        uint256 amount = bound(amountSeed, 0.0001 ether, 2 ether);
+
+        MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
+        MockERC20 t1 = MockERC20(Currency.unwrap(currency1));
+        uint256 t0Before = t0.balanceOf(address(this));
+        uint256 t1Before = t1.balanceOf(address(this));
+
+        if (!exactOut) {
+            _sim(amount, zeroForOne);
+            swapRouter.swapExactTokensForTokens(amount, 0, zeroForOne, poolKey, "", address(this), block.timestamp);
+
+            if (zeroForOne) {
+                assertEq(t0.balanceOf(address(this)), t0Before - amount, "pays gross input");
+                assertEq(t1.balanceOf(address(this)) - t1Before, s_simOut, "output matches simulation");
+            } else {
+                assertEq(t1.balanceOf(address(this)), t1Before - amount, "pays gross input");
+                assertEq(t0.balanceOf(address(this)) - t0Before, s_simOut, "output matches simulation");
+            }
+            assertEq(s_simUsed, amount, "simulation should consume all input");
+        } else {
+            _simOut(amount, zeroForOne);
+            swapRouter.swapTokensForExactTokens(
+                amount, type(uint256).max, zeroForOne, poolKey, "", address(this), block.timestamp
+            );
+
+            if (zeroForOne) {
+                assertEq(t1.balanceOf(address(this)) - t1Before, amount, "receives exact output");
+                assertEq(t0.balanceOf(address(this)), t0Before - s_simIn, "input matches simulation");
+            } else {
+                assertEq(t0.balanceOf(address(this)) - t0Before, amount, "receives exact output");
+                assertEq(t1.balanceOf(address(this)), t1Before - s_simIn, "input matches simulation");
+            }
+            assertEq(s_simOut, amount, "simulation should deliver all output");
+        }
     }
 
     // ── general workflows ────────────────────────────────────────────────
