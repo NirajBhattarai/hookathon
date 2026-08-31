@@ -313,6 +313,11 @@ export function SwapForm() {
 
   const needsApproval = erc20ToRouter < amountInRaw;
 
+  const insufficientBalance = useMemo(() => {
+    if (payBalance === undefined || amountInRaw === 0n) return false;
+    return amountInRaw > payBalance;
+  }, [payBalance, amountInRaw]);
+
   useEffect(() => {
     if (!isSuccess) return;
     setTxModalStatus("success");
@@ -342,11 +347,22 @@ export function SwapForm() {
     if (isPending || confirming) return "Confirm in wallet…";
     if (sameAddress(inAddr, outAddr)) return "Pick two different tokens";
     if (!amountIn || Number(amountIn) <= 0) return "Enter an amount";
+    if (insufficientBalance) return `Insufficient ${paySymbol ?? "balance"}`;
     if (noPool) return "No pool for this pair";
     if (quoteErrorText === "NO_LIQUIDITY") return "No liquidity";
     if (quoteErrorText === "TOO_LARGE") return "Amount too large for pool";
     return "Swap";
-  }, [isPending, confirming, amountIn, inAddr, outAddr, quoteErrorText, noPool]);
+  }, [
+    isPending,
+    confirming,
+    amountIn,
+    inAddr,
+    outAddr,
+    insufficientBalance,
+    paySymbol,
+    quoteErrorText,
+    noPool,
+  ]);
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -400,9 +416,12 @@ export function SwapForm() {
         const approveGas = approveSim?.request.gas
           ? (approveSim.request.gas * 12n) / 10n
           : undefined;
-        await writeContractAsync(
+        const approveHash = await writeContractAsync(
           approveGas ? { ...approveParams, gas: approveGas } : approveParams
         );
+        if (publicClient) {
+          await publicClient.waitForTransactionReceipt({ hash: approveHash, timeout: 120_000 });
+        }
         await allowQ.refetch();
         setTxSteps((prev) => prev.map((s, i) => (i === 0 ? { ...s, done: true } : s)));
       }
@@ -581,6 +600,7 @@ export function SwapForm() {
           !amountIn ||
           Number(amountIn) <= 0 ||
           sameAddress(inAddr, outAddr) ||
+          insufficientBalance ||
           quoteErrorText === "NO_LIQUIDITY" ||
           quoteErrorText === "TOO_LARGE" ||
           noPool

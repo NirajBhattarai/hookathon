@@ -8,6 +8,7 @@ const links = [
   { href: "/liquidity", label: "Liquidity", prefetch: false },
   { href: "/portfolio", label: "Portfolio", prefetch: false },
   { href: "/faucet", label: "Faucet", prefetch: false },
+  { href: "/custom-token", label: "Launch", prefetch: false },
   { href: "/docs", label: "Docs", prefetch: true },
 ] as const;
 

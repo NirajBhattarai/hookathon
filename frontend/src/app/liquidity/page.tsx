@@ -1,4 +1,5 @@
 import dynamic from "next/dynamic";
+import { Suspense } from "react";
 import { PageFallback } from "@/components/PageFallback";
 
 const LiquidityConsole = dynamic(
@@ -9,7 +10,9 @@ const LiquidityConsole = dynamic(
 export default function LiquidityPage() {
   return (
     <main>
-      <LiquidityConsole />
+      <Suspense fallback={<PageFallback label="Loading liquidity console…" />}>
+        <LiquidityConsole />
+      </Suspense>
     </main>
   );
 }

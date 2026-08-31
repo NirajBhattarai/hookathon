@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { formatUnits, maxUint256, parseUnits, type Address } from "viem";
+import { useSearchParams } from "next/navigation";
+import { formatUnits, isAddress, maxUint256, parseUnits, type Address } from "viem";
 import { useAccount, useReadContracts } from "wagmi";
 import { useContractWrite } from "@/hooks/useContractWrite";
 import { binBookAbi } from "@/lib/abi/binBook";
@@ -10,6 +11,7 @@ import { TxModal, type TxStatus, type TxStep } from "@/components/TxModal";
 import { useAppPublicClient } from "@/hooks/useAppPublicClient";
 import { useBinLiquidity } from "@/hooks/useBinLiquidity";
 import { useBook } from "@/hooks/useBook";
+import { useCustomTokens } from "@/hooks/useCustomTokens";
 import { useDeployment } from "@/hooks/useDeployment";
 import { usePool } from "@/hooks/usePool";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
@@ -136,17 +138,29 @@ function TokenAmountField({
 export function LiquidityConsole() {
   const { address, isConnected } = useAccount();
   const { deployment, ready, needsNetworkSwitch } = useDeployment();
+  const searchParams = useSearchParams();
+  const tokenParam = searchParams.get("token");
+  const quoteParam = searchParams.get("quote");
+  const { faucetTokens: customTokens } = useCustomTokens();
 
   // Pair picker — defaults to the deployment's configured pair (BINU/WETH), but any two tokens
   // can be picked: existing pools get an "Add liquidity" flow, new ones a "Create pool" one.
   const [baseAddr, setBaseAddr] = useState<Address | undefined>(undefined);
   const [quoteAddr, setQuoteAddr] = useState<Address | undefined>(undefined);
   useEffect(() => {
-    if (deployment && !baseAddr && !quoteAddr) {
-      setBaseAddr(deployment.token0);
-      setQuoteAddr(deployment.token1);
+    if (tokenParam && isAddress(tokenParam)) {
+      setBaseAddr(tokenParam);
+      return;
     }
-  }, [deployment, baseAddr, quoteAddr]);
+    if (deployment && !baseAddr) setBaseAddr(deployment.token0);
+  }, [deployment, tokenParam, baseAddr]);
+  useEffect(() => {
+    if (quoteParam && isAddress(quoteParam)) {
+      setQuoteAddr(quoteParam);
+      return;
+    }
+    if (deployment && !quoteAddr) setQuoteAddr(deployment.token1);
+  }, [deployment, quoteParam, quoteAddr]);
 
   const pair = baseAddr && quoteAddr ? { token0: baseAddr, token1: quoteAddr } : undefined;
   const pairInvalid =
@@ -192,6 +206,10 @@ export function LiquidityConsole() {
         address: deployment.token1,
       });
     }
+    const seen = new Set(out.map((t) => t.address.toLowerCase()));
+    for (const t of customTokens) {
+      if (!seen.has(t.address.toLowerCase())) out.push(t);
+    }
     return out;
   }, [
     deployment?.token0,
@@ -202,6 +220,7 @@ export function LiquidityConsole() {
     defQuote.symbol,
     defQuote.decimals,
     defQuote.color,
+    customTokens,
   ]);
 
   const { key } = usePool(pair);

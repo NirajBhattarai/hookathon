@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
+import { useCustomTokens } from "@/hooks/useCustomTokens";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
 import { shortenAddress } from "@/lib/bins";
 import { FAUCET_TOKENS, type FaucetToken } from "@/lib/tokens";
@@ -40,6 +41,7 @@ export function TokenSelect({
   // useTokenMeta already falls back to a live read for a token outside the static faucet list,
   // so the button shows the right symbol even for one not passed via extraTokens either.
   const current = useTokenMeta(value);
+  const { faucetTokens: customTokens } = useCustomTokens();
 
   useEffect(() => {
     function onDoc(e: MouseEvent) {
@@ -50,11 +52,16 @@ export function TokenSelect({
   }, []);
 
   const allTokens = useMemo(() => {
-    if (!extraTokens?.length) return FAUCET_TOKENS;
-    const seen = new Set(FAUCET_TOKENS.map((t) => t.address.toLowerCase()));
-    const extras = extraTokens.filter((t) => !seen.has(t.address.toLowerCase()));
-    return [...extras, ...FAUCET_TOKENS];
-  }, [extraTokens]);
+    const seen = new Set<string>();
+    const out: FaucetToken[] = [];
+    for (const t of [...(extraTokens ?? []), ...customTokens, ...FAUCET_TOKENS]) {
+      const k = t.address.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(t);
+    }
+    return out;
+  }, [extraTokens, customTokens]);
 
   const list = useMemo(() => {
     const s = q.trim().toLowerCase();
