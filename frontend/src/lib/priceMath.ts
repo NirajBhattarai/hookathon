@@ -39,9 +39,16 @@ export function formatPriceHuman(p: number, sigFigs = 4): string {
   if (p >= 0.0001) return p.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 
   const exp = Math.floor(Math.log10(p));
-  const zeroCount = -exp - 1;
+  let zeroCount = -exp - 1;
   const mantissa = p / 10 ** exp;
-  const sig = mantissa.toPrecision(sigFigs).replace(".", "").slice(0, sigFigs);
+  // toPrecision rounds; a value just below a power of ten (e.g. 0.00009999999) rounds up to
+  // "10.00". That bumps the magnitude by a factor of 10, so carry the exponent/zero-count up by
+  // one to keep the printed price on the correct order of magnitude.
+  const prec = mantissa.toPrecision(sigFigs);
+  const carry = Number(prec) >= 10 ? 1 : 0;
+  zeroCount += carry;
+  const scaled = Number(prec) / 10 ** carry;
+  const sig = scaled.toPrecision(sigFigs).replace(".", "").slice(0, sigFigs);
   return `0.0${toSubscript(zeroCount)}${sig}`;
 }
 

@@ -26,7 +26,7 @@ export function useTvl(price: number | null) {
   const dec1 = useTokenMeta(key?.currency1).decimals;
 
   const q = useReadContracts({
-    query: { enabled: ready && !!deployment && !!key },
+    query: { enabled: ready && !!deployment && !!key, staleTime: 30_000, refetchOnWindowFocus: false },
     contracts:
       deployment && key
         ? ([

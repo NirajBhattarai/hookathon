@@ -1344,6 +1344,22 @@ input {
   box-shadow: 0 0 14px color-mix(in oklab, var(--accent) 55%, transparent);
 }
 
+.ramp-bar.hovered {
+  filter: brightness(1.2);
+  outline: 1px solid color-mix(in oklab, var(--accent) 45%, transparent);
+}
+
+.ramp-bin-price {
+  margin: 0.45rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.ramp-bin-price b {
+  color: var(--ink);
+}
+
 .ramp-current-line {
   position: absolute;
   top: -0.6rem;
@@ -2183,6 +2199,32 @@ input {
   width: 100%;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+.withdraw-slippage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.withdraw-slippage input {
+  width: 3rem;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  text-align: right;
+}
+
+.panel-loading {
+  opacity: 0.72;
+}
+
+.panel-refreshing .ladder {
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
 }
 
 /* skeleton loading */

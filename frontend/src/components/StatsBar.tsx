@@ -7,6 +7,7 @@ import { usePool } from "@/hooks/usePool";
 import { useSwapActivity } from "@/hooks/useSwapActivity";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
 import { useTvl } from "@/hooks/useTvl";
+import { useTradePair } from "@/context/TradePairContext";
 import { computeStats, toCandles, type Candle } from "@/lib/priceSeries";
 import { demoCandles, demoStats } from "@/lib/demo";
 import { formatPriceHuman, sqrtPriceX96ToPrice } from "@/lib/priceMath";
@@ -26,24 +27,30 @@ function sparkPoints(candles: Candle[], w = 120, h = 32): string {
     .join(" ");
 }
 
-function fmtUsd(n: number): string {
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
-  return `$${n.toFixed(2)}`;
+// volume/TVL are denominated in the pool's *quote* token (currency1), not necessarily USD — only
+// prefix with "$" when the quote is a known USD stablecoin so we never overstate a fiat value.
+const USD_STABLECOINS = new Set(["USDC", "USDT", "DAI", "BUSD", "FDUSD", "TUSD"]);
+function fmtQuote(n: number, symbol: string): string {
+  const prefix = USD_STABLECOINS.has(symbol) ? "$" : `${symbol} `;
+  if (n >= 1_000_000) return `${prefix}${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${prefix}${(n / 1_000).toFixed(1)}K`;
+  return `${prefix}${n.toFixed(2)}`;
 }
 
 export function StatsBar() {
   const { deployment, ready } = useDeployment();
+  const { pair: tradePair, pairResolved } = useTradePair();
   const { key } = usePool();
   const { book } = useBook();
   const preview = !ready;
 
-  const base = useTokenMeta(key?.currency0);
-  const quote = useTokenMeta(key?.currency1);
+  const base = useTokenMeta(tradePair?.token0 ?? key?.currency0);
+  const quote = useTokenMeta(tradePair?.token1 ?? key?.currency1);
   const quoteDecimals = quote.decimals ?? 18;
 
-  const { events } = useSwapActivity("1D");
+  const { events, isLoading: activityLoading } = useSwapActivity("1D");
   const liveStats = useMemo(() => computeStats(events, quoteDecimals), [events, quoteDecimals]);
+  const statsPending = !preview && (!pairResolved || activityLoading);
   const stats = preview ? demoStats() : liveStats;
 
   // The pool's live AMM price is always available once it's seeded — unlike lastPrice, which
@@ -94,17 +101,27 @@ export function StatsBar() {
         <div className="stat-pill">
           <span className="stat-pill-label">24h change</span>
           <span className={`stat-pill-value ${up ? "up" : "down"}`}>
-            {stats.changePct != null ? `${up ? "+" : ""}${stats.changePct.toFixed(2)}%` : "—"}
+            {statsPending
+              ? "…"
+              : stats.changePct != null
+                ? `${up ? "+" : ""}${stats.changePct.toFixed(2)}%`
+                : "—"}
           </span>
         </div>
         <div className="stat-pill">
-          <span className="stat-pill-label">24h volume</span>
-          <span className="stat-pill-value">{fmtUsd(stats.volumeQuote)}</span>
+          <span className="stat-pill-label">24h volume ({quoteSymbol})</span>
+          <span className="stat-pill-value">
+            {statsPending ? "…" : fmtQuote(stats.volumeQuote, quoteSymbol)}
+          </span>
         </div>
         <div className="stat-pill">
-          <span className="stat-pill-label">TVL</span>
+          <span className="stat-pill-label">TVL ({quoteSymbol})</span>
           <span className="stat-pill-value">
-            {preview ? fmtUsd(842_000) : tvl.tvlInQuote != null ? fmtUsd(tvl.tvlInQuote) : "—"}
+            {preview
+              ? fmtQuote(842_000, quoteSymbol)
+              : statsPending || tvl.tvlInQuote == null
+                ? "…"
+                : fmtQuote(tvl.tvlInQuote, quoteSymbol)}
           </span>
         </div>
         <div className="stat-pill">

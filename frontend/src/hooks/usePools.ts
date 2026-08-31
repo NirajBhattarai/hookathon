@@ -6,8 +6,10 @@ import { useAppPublicClient } from "./useAppPublicClient";
 import { useDeployment } from "./useDeployment";
 
 /** Bounds the scan so a long-lived chain (Sepolia is already 11M+ blocks) doesn't turn "find my
- *  pools" into thousands of chunked eth_getLogs calls — mirrors useSwapActivity's capped "ALL". */
-const POOL_SCAN_BLOCKS = 150_000n;
+ *  pools" into thousands of chunked eth_getLogs calls. Converted to a time window from the
+ *  chain's measured block time, capped by hard block limits for RPC safety. */
+const POOL_SCAN_SECONDS = 30 * 24 * 60 * 60; // ~30 days of history
+const POOL_SCAN_MAX_BLOCKS = 2_000_000n;
 
 /**
  * Every pool created against the connected chain's BinBook in the recent history window —
@@ -26,7 +28,28 @@ export function usePools() {
     queryFn: async (): Promise<CreatedPool[]> => {
       const c = client!;
       const latest = await c.getBlockNumber();
-      const fromBlock = latest > POOL_SCAN_BLOCKS ? latest - POOL_SCAN_BLOCKS : 0n;
+
+      // Measure the chain's block time from two recent blocks so the window is accurate on any
+      // chain, falling back to a ~12s/block estimate when metadata is unavailable.
+      let fromBlock: bigint;
+      try {
+        const [latestBlock, prevBlock] = await Promise.all([
+          c.getBlock({ blockNumber: latest }),
+          c.getBlock({ blockNumber: latest - 1n }),
+        ]);
+        const blockTime =
+          latestBlock.timestamp === prevBlock.timestamp
+            ? 12n
+            : latestBlock.timestamp - prevBlock.timestamp;
+        const blocks =
+          blockTime > 0n ? (BigInt(POOL_SCAN_SECONDS) + blockTime - 1n) / blockTime : 0n;
+        const capped = blocks > 0n && blocks < POOL_SCAN_MAX_BLOCKS ? blocks : POOL_SCAN_MAX_BLOCKS;
+        fromBlock = latest > capped ? latest - capped : 0n;
+      } catch {
+        const blocks = BigInt(POOL_SCAN_SECONDS) / 12n;
+        fromBlock = latest > blocks ? latest - blocks : 0n;
+      }
+
       return fetchCreatedPools(c, { binBook: deployment!.binBook, fromBlock, toBlock: latest });
     },
   });

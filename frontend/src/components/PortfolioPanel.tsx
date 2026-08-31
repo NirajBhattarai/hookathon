@@ -11,7 +11,9 @@ import { useDeployment } from "@/hooks/useDeployment";
 import { usePairPosition } from "@/hooks/usePairPosition";
 import { usePool } from "@/hooks/usePool";
 import { usePositions, type Position } from "@/hooks/usePositions";
+import { useAppPublicClient } from "@/hooks/useAppPublicClient";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
+import { unpackBalanceDelta } from "@/lib/balanceDelta";
 import { formatBigIntCompact, formatPriceHuman, sqrtPriceX96ToPrice } from "@/lib/priceMath";
 import type { FaucetToken } from "@/lib/tokens";
 
@@ -29,10 +31,13 @@ function fmtAmount(raw: bigint, decimals?: number): string {
 
 function PositionCard({ position, onChanged }: { position: Position; onChanged: () => void }) {
   const { deployment } = useDeployment();
+  const { address } = useAccount();
+  const publicClient = useAppPublicClient(deployment);
   const base = useTokenMeta(position.key.currency0);
   const quote = useTokenMeta(position.key.currency1);
 
   const [pct, setPct] = useState(100);
+  const [slippage, setSlippage] = useState("0.50");
   const [expanded, setExpanded] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -68,45 +73,78 @@ function PositionCard({ position, onChanged }: { position: Position; onChanged: 
   }
 
   async function claim() {
-    if (!deployment) return;
-    await run("Claim Fees", undefined, () =>
-      writeContractAsync({
+    if (!deployment || !address || !publicClient) return;
+    await run("Claim Fees", undefined, async () => {
+      const args = [position.key] as const;
+      const sim = await publicClient.simulateContract({
         address: deployment.binBook,
         abi: binBookAbi,
         functionName: "collectFees",
-        args: [position.key],
-        gas: 1_500_000n,
-      })
-    );
+        args,
+        account: address,
+      } as Parameters<typeof publicClient.simulateContract>[0]);
+      const gas = sim.request.gas ? (sim.request.gas * 12n) / 10n : 1_500_000n;
+      return writeContractAsync({
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "collectFees",
+        args,
+        gas,
+      });
+    });
   }
 
   async function remove() {
-    if (!deployment || !position.hasRange) return;
+    if (!deployment || !position.hasRange || !address || !publicClient) return;
     const amount = (position.shares * BigInt(pct)) / 100n;
     if (amount === 0n) return;
-    await run("Remove Liquidity", `${pct}% of your position`, () =>
-      writeContractAsync({
+
+    const tickLower = position.tickLower;
+    const tickUpper = position.tickUpper;
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+    const userInputSalt = ("0x" + "00".repeat(32)) as `0x${string}`;
+    // Slippage scaled down from the simulated exact-out amounts, so a small adverse price move
+    // between quote and execution doesn't revert, but a material shortfall does.
+    const pctSlippage = Math.min(Math.max(Number(slippage) || 0.5, 0), 99);
+    const minScale = (v: bigint) =>
+      v > 0n ? (v * BigInt(Math.round((100 - pctSlippage) * 100))) / 10_000n : 0n;
+
+    const key = position.key;
+    const argsFor = (mins: readonly [bigint, bigint]) =>
+      [
+        key,
+        {
+          liquidity: amount,
+          amount0Min: mins[0],
+          amount1Min: mins[1],
+          deadline,
+          tickLower,
+          tickUpper,
+          userInputSalt,
+        },
+      ] as const;
+
+    await run("Remove Liquidity", `${pct}% of your position`, async () => {
+      // Simulate with zero mins to get the exact redeemable token0/token1, then set real
+      // slippage-bounded mins on the live call.
+      const sim = await publicClient.simulateContract({
         address: deployment.binBook,
         abi: binBookAbi,
         functionName: "removeLiquidity",
-        args: [
-          position.key,
-          {
-            liquidity: amount,
-            amount0Min: 0n,
-            amount1Min: 0n,
-            deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
-            // removeLiquidity now scopes redemption to this exact range instead of a pool-wide
-            // slice — see BinBook._decreaseUserLInRange. This is the caller's own tracked range
-            // (userRanges), read via usePositions/usePairPosition.
-            tickLower: position.tickLower,
-            tickUpper: position.tickUpper,
-            userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
-          },
-        ],
+        args: argsFor([0n, 0n]),
+        account: address,
         gas: 2_000_000n,
-      })
-    );
+      });
+      const [out0, out1] = unpackBalanceDelta(sim.result as bigint);
+      const gas = sim.request.gas ? (sim.request.gas * 12n) / 10n : 2_000_000n;
+      return writeContractAsync({
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "removeLiquidity",
+        args: argsFor([minScale(out0), minScale(out1)]),
+        gas,
+      });
+    });
   }
 
   const accentA = base.color ?? "#3ecf8e";
@@ -193,6 +231,17 @@ function PositionCard({ position, onChanged }: { position: Position; onChanged: 
             className="withdraw-slider"
             aria-label="Percent to remove"
           />
+          <div className="withdraw-slippage">
+            <span>Max slippage</span>
+            <span>
+              <input
+                value={slippage}
+                onChange={(e) => setSlippage(e.target.value)}
+                aria-label="Slippage percent"
+              />
+              %
+            </span>
+          </div>
           <button type="button" className="cta" onClick={remove} disabled={busy}>
             {busy && modalAction === "Remove Liquidity" ? "Confirm…" : `Remove ${pct}%`}
           </button>

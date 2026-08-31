@@ -2,6 +2,13 @@ import { encodeAbiParameters, keccak256, parseAbiParameters, type Address } from
 import type { ChainDeployment } from "@/config/chains";
 
 /** Mirrors v4-core's PoolKey struct (all static types). */
+export type PoolPairOverride = {
+  token0: Address;
+  token1: Address;
+  /** When omitted, the deployment's default tickSpacing is used. */
+  tickSpacing?: number;
+};
+
 export type PoolKeyLike = {
   currency0: Address;
   currency1: Address;
@@ -15,12 +22,9 @@ const POOL_KEY_PARAMS = parseAbiParameters("address, address, uint24, int24, add
 /**
  * Build a PoolKey for the deployment's hook/fee/tickSpacing, with v4's currency0 < currency1
  * ordering. Defaults to the deployment's configured pair; pass `pair` to target any other pair
- * (fee, tickSpacing and the BinBook hook stay fixed per deployment — only the tokens vary).
+ * (fee and the BinBook hook stay fixed per deployment — tokens and tickSpacing may vary).
  */
-export function poolKeyFor(
-  d: ChainDeployment,
-  pair?: { token0: Address; token1: Address }
-): PoolKeyLike {
+export function poolKeyFor(d: ChainDeployment, pair?: PoolPairOverride): PoolKeyLike {
   const t0 = pair?.token0 ?? d.token0;
   const t1 = pair?.token1 ?? d.token1;
   const [currency0, currency1] = t0.toLowerCase() < t1.toLowerCase() ? [t0, t1] : [t1, t0];
@@ -28,7 +32,7 @@ export function poolKeyFor(
     currency0,
     currency1,
     fee: d.poolFee,
-    tickSpacing: d.tickSpacing,
+    tickSpacing: pair?.tickSpacing ?? d.tickSpacing,
     hooks: d.binBook,
   };
 }
@@ -39,5 +43,18 @@ export function poolKeyFor(
 export function computePoolId(k: PoolKeyLike): `0x${string}` {
   return keccak256(
     encodeAbiParameters(POOL_KEY_PARAMS, [k.currency0, k.currency1, k.fee, k.tickSpacing, k.hooks])
+  );
+}
+
+export function poolPairsEqual(
+  a: PoolPairOverride | null | undefined,
+  b: PoolPairOverride | null | undefined
+): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return (
+    a.token0.toLowerCase() === b.token0.toLowerCase() &&
+    a.token1.toLowerCase() === b.token1.toLowerCase() &&
+    a.tickSpacing === b.tickSpacing
   );
 }

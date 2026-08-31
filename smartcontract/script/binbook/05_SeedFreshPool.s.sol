@@ -12,6 +12,7 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BinBook} from "../../src/BinBook.sol";
 import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 import {BinBookBase} from "./BinBookBase.s.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 /// @notice Seeds a FRESH USDC/WETH pool (tickSpacing=10) priced at 1 WETH = PRICE_USDC USDC.
 ///         Env: PRICE_USDC (default 3000), AMOUNT0 (USDC raw), AMOUNT1 (WETH raw).
@@ -54,6 +55,11 @@ contract SeedFreshPool is BinBookBase {
         IERC20(d.token0).approve(d.binBook, type(uint256).max);
         IERC20(d.token1).approve(d.binBook, type(uint256).max);
 
+        // Default ramp window around the pool's starting price (not tick 0 — that only works at 1:1).
+        int24 bs = ts;
+        int24 tick = TickMath.getTickAtSqrtPrice(sqrtP);
+        int24 curBin = tick / bs;
+        if (tick % bs != 0 && tick < 0) curBin -= 1;
         binBook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -62,8 +68,8 @@ contract SeedFreshPool is BinBookBase {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp + 600,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: (curBin - 10) * bs,
+                tickUpper: (curBin + 10) * bs,
                 userInputSalt: bytes32(0)
             })
         );

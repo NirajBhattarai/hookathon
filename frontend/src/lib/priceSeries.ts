@@ -15,7 +15,9 @@ export type VolumeBar = {
   buy: boolean; // true = pool sold token0 (price pressure up)
 };
 
-/** Bucket swap events into OHLC candles. Buckets with no swaps repeat the prior close (flat candle). */
+/** Bucket swap events into OHLC candles, one per bucket that actually contains a swap. Buckets
+ *  with no swaps are omitted (the series gaps) rather than synthesized as a flat candle; each
+ *  candle opens at the prior bucket's close. */
 export function toCandles(events: SwapEvent[], bucketSeconds: number): Candle[] {
   if (events.length === 0) return [];
   const byBucket = new Map<number, number[]>();

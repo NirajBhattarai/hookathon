@@ -13,6 +13,36 @@ export function binAtTick(tick: number, binSize: number): number {
   return q;
 }
 
+/** Per-bin price edges and means in human units (token1 per token0). */
+export type BinPriceInfo = {
+  tickLower: number;
+  tickUpper: number;
+  /** 1.0001^tickLower — lower edge of the bin */
+  priceLower: number;
+  /** 1.0001^tickUpper — upper edge (exclusive in v4, but shown as range cap) */
+  priceUpper: number;
+  /** (priceLower + priceUpper) / 2 */
+  arithmeticMean: number;
+  /** sqrt(priceLower × priceUpper) = 1.0001^((tickLower + tickUpper) / 2) */
+  geometricMean: number;
+};
+
+/** Uniswap tick prices for one bin `[binIndex × binSize, (binIndex + 1) × binSize)`. */
+export function binPriceInfo(binIndex: number, binSize: number): BinPriceInfo {
+  const tickLower = tickAtBin(binIndex, binSize);
+  const tickUpper = tickAtBin(binIndex + 1, binSize);
+  const priceLower = tickToPrice(tickLower);
+  const priceUpper = tickToPrice(tickUpper);
+  return {
+    tickLower,
+    tickUpper,
+    priceLower,
+    priceUpper,
+    arithmeticMean: (priceLower + priceUpper) / 2,
+    geometricMean: Math.sqrt(priceLower * priceUpper),
+  };
+}
+
 export type BinDepth = {
   binIndex: number;
   tickLower: number;

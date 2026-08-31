@@ -44,6 +44,7 @@ export function CreatePoolForm() {
   const [seed0, setSeed0] = useState("1000");
   const [seed1, setSeed1] = useState("1000");
   const [withSeed, setWithSeed] = useState(true);
+  const [slippage, setSlippage] = useState("0.50");
   const [status, setStatus] = useState<string | null>(null);
 
   const { writeContractAsync, data: hash, isPending } = useWriteContract();
@@ -157,12 +158,14 @@ export function CreatePoolForm() {
         if (amount0 > 0n || amount1 > 0n) {
           // Contract rejects tickLower >= tickUpper (no 0/0 "auto" sentinel). Mirror
           // LiquidityConsole / createPool defaults: curBin ± DEFAULT_BINS_PER_SIDE.
-          const curBin = binAtTick(
-            Math.round(Math.log(price) / Math.log(1.0001)),
-            bs
-          );
+          const curBin = binAtTick(Math.round(Math.log(price) / Math.log(1.0001)), bs);
           const tickLower = tickAtBin(curBin - DEFAULT_BINS_PER_SIDE, bs);
           const tickUpper = tickAtBin(curBin + DEFAULT_BINS_PER_SIDE, bs);
+
+          // Slippage guard: allow the pool to take slightly less than the seeded amount of each
+          // token, but not materially less.
+          const pct = Math.min(Math.max(Number(slippage) || 0.5, 0), 99);
+          const scale = (v: bigint) => (v * BigInt(Math.round((100 - pct) * 100))) / 10_000n;
 
           await writeContractAsync({
             address: deployment.binBook,
@@ -173,8 +176,8 @@ export function CreatePoolForm() {
               {
                 amount0Desired: amount0,
                 amount1Desired: amount1,
-                amount0Min: 0n,
-                amount1Min: 0n,
+                amount0Min: scale(amount0),
+                amount1Min: scale(amount1),
                 deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
                 tickLower,
                 tickUpper,
@@ -294,6 +297,14 @@ export function CreatePoolForm() {
                         placeholder="0"
                       />
                     </div>
+                  </div>
+                  <div className="field">
+                    <label>Seed slippage %</label>
+                    <input
+                      value={slippage}
+                      onChange={(e) => setSlippage(e.target.value)}
+                      inputMode="decimal"
+                    />
                   </div>
                 </>
               )}

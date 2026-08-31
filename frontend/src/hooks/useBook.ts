@@ -6,6 +6,11 @@ import { DEMO_BOOK } from "@/lib/demo";
 import { useDeployment } from "./useDeployment";
 import { usePool, type PoolPairOverride } from "./usePool";
 
+const BOOK_QUERY_OPTS = {
+  staleTime: 30_000,
+  refetchOnWindowFocus: false,
+} as const;
+
 export type BookView = {
   binSize: number;
   ramp: number;
@@ -68,14 +73,17 @@ export function useBook(pair?: PoolPairOverride) {
             },
           ]
         : [],
-    query: { enabled: ready && !!poolId },
+    query: { enabled: ready && !!poolId, ...BOOK_QUERY_OPTS },
   });
 
   const bookTuple = parseBookTuple(q.data?.[0]?.result);
-  const liveBook: BookView | null = bookTuple
-    ? { ...bookTuple, configured: Boolean(q.data?.[1]?.result) }
-    : null;
+  const liveBook: BookView | null =
+    poolId && bookTuple ? { ...bookTuple, configured: Boolean(q.data?.[1]?.result) } : null;
   const book = preview ? DEMO_BOOK : liveBook;
 
-  return { book, preview, isLoading: q.isLoading };
+  return {
+    book,
+    preview,
+    isLoading: !preview && (!poolId || (q.isPending && liveBook === null)),
+  };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { formatUnits, maxUint256, parseUnits, type Address } from "viem";
 import { useAccount, useReadContracts, useWriteContract } from "wagmi";
 import { binBookAbi } from "@/lib/abi/binBook";
@@ -15,6 +15,7 @@ import { usePool } from "@/hooks/usePool";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
 import {
   binAtTick,
+  binPriceInfo,
   buildRampPreview,
   composeRangeAmounts,
   DEFAULT_BINS_PER_SIDE,
@@ -139,7 +140,8 @@ export function LiquidityConsole() {
   }, [deployment, baseAddr, quoteAddr]);
 
   const pair = baseAddr && quoteAddr ? { token0: baseAddr, token1: quoteAddr } : undefined;
-  const pairInvalid = !!baseAddr && !!quoteAddr && baseAddr.toLowerCase() === quoteAddr.toLowerCase();
+  const pairInvalid =
+    !!baseAddr && !!quoteAddr && baseAddr.toLowerCase() === quoteAddr.toLowerCase();
 
   // Picking a token already on the other side swaps instead of duplicating it.
   function selectAt(slot: "base" | "quote", a: Address) {
@@ -182,7 +184,16 @@ export function LiquidityConsole() {
       });
     }
     return out;
-  }, [deployment?.token0, deployment?.token1, defBase.symbol, defBase.decimals, defBase.color, defQuote.symbol, defQuote.decimals, defQuote.color]);
+  }, [
+    deployment?.token0,
+    deployment?.token1,
+    defBase.symbol,
+    defBase.decimals,
+    defBase.color,
+    defQuote.symbol,
+    defQuote.decimals,
+    defQuote.color,
+  ]);
 
   const { key } = usePool(pair);
   const { book, preview } = useBook(pair);
@@ -190,28 +201,42 @@ export function LiquidityConsole() {
 
   const base = useTokenMeta(key?.currency0);
   const quote = useTokenMeta(key?.currency1);
+  const pickBase = useTokenMeta(baseAddr ?? key?.currency0);
+  const pickQuote = useTokenMeta(quoteAddr ?? key?.currency1);
 
-  // currency0/currency1 are address-sorted, so whichever of base/quote picked "first" can land on
-  // either side — track which picker slot each deposit field's token actually corresponds to.
-  const currency0Slot: "base" | "quote" =
-    key && baseAddr && key.currency0.toLowerCase() === baseAddr.toLowerCase() ? "base" : "quote";
-  const currency1Slot: "base" | "quote" = currency0Slot === "base" ? "quote" : "base";
+  const baseIsCurrency0 = useMemo(() => {
+    if (!key || !baseAddr) return true;
+    return baseAddr.toLowerCase() === key.currency0.toLowerCase();
+  }, [key, baseAddr]);
 
-  const [amount0, setAmount0] = useState("1");
-  const [amount1, setAmount1] = useState("1");
+  const [baseAmount, setBaseAmount] = useState("1");
+  const [quoteAmount, setQuoteAmount] = useState("1");
+  const depositLeaderRef = useRef<"base" | "quote">("base");
+
+  const amount0 = baseIsCurrency0 ? baseAmount : quoteAmount;
+  const amount1 = baseIsCurrency0 ? quoteAmount : baseAmount;
   const [shape, setShape] = useState<Shape>("auto");
   const [lowerBin, setLowerBin] = useState<number | null>(null);
   const [upperBin, setUpperBin] = useState<number | null>(null);
+  const [hoveredBin, setHoveredBin] = useState<number | null>(null);
   const [rangeStart, setRangeStart] = useState<number | null>(null);
   const [startingPrice, setStartingPrice] = useState("1");
   const [binSize, setBinSize] = useState("60");
+  const [slippage, setSlippage] = useState("0.50");
   const [status, setStatus] = useState<string | null>(null);
+
+  function resetDepositAmounts() {
+    setBaseAmount("1");
+    setQuoteAmount("1");
+    depositLeaderRef.current = "base";
+  }
 
   function resetRange() {
     setShape("auto");
     setLowerBin(null);
     setUpperBin(null);
     setRangeStart(null);
+    resetDepositAmounts();
   }
 
   const needsCreate = !!book && !preview && !book.configured;
@@ -246,7 +271,9 @@ export function LiquidityConsole() {
   // contract's per-bin token0/token1 split so typing one amount can correctly derive the other,
   // and so a range entirely above/below spot locks out the token it doesn't need.
   const baseRamp = showDemo ? DEFAULT_RAMP : (book?.ramp ?? DEFAULT_RAMP);
-  const numBinsPerSide = showDemo ? DEFAULT_BINS_PER_SIDE : (book?.numBinsPerSide ?? DEFAULT_BINS_PER_SIDE);
+  const numBinsPerSide = showDemo
+    ? DEFAULT_BINS_PER_SIDE
+    : (book?.numBinsPerSide ?? DEFAULT_BINS_PER_SIDE);
   // The demo ramp's own axisBook always centers on bin 0 (a fixed, price-independent visual), but
   // the actual deposit composition must be centered on whichever bin the entered starting price
   // falls into — otherwise a price far from 1 makes the checked range miss the real price entirely,
@@ -267,41 +294,80 @@ export function LiquidityConsole() {
     [effLower, effUpper, curBin, effBinSize, baseRamp, compositionPrice]
   );
 
-  function handleAmount0Change(v: string) {
-    setAmount0(v);
-    if (composition.mode !== "straddle" || composition.need0 <= 0) return;
-    const n = Number(v);
-    if (Number.isFinite(n) && n >= 0) {
-      setAmount1(trimDecimal((n * composition.need1) / composition.need0));
-    }
-  }
+  const depositRatioQuotePerBase = useMemo(() => {
+    if (composition.mode !== "straddle" || composition.need0 <= 0) return null;
+    const baseNeed = baseIsCurrency0 ? composition.need0 : composition.need1;
+    const quoteNeed = baseIsCurrency0 ? composition.need1 : composition.need0;
+    if (baseNeed <= 0) return null;
+    return quoteNeed / baseNeed;
+  }, [composition, baseIsCurrency0]);
 
-  function handleAmount1Change(v: string) {
-    setAmount1(v);
-    if (composition.mode !== "straddle" || composition.need1 <= 0) return;
-    const n = Number(v);
-    if (Number.isFinite(n) && n >= 0) {
-      setAmount0(trimDecimal((n * composition.need0) / composition.need1));
-    }
-  }
-
-  // Force the irrelevant side to 0 the moment the range becomes single-sided.
-  useEffect(() => {
-    if (composition.mode === "above") setAmount1("0");
-    else if (composition.mode === "below") setAmount0("0");
-  }, [composition.mode]);
-
-  // Re-derive amount1 from amount0 whenever the range selection itself changes (not on every
-  // keystroke — this only tracks the range, using amount0/composition as of that change).
-  useEffect(() => {
-    if (composition.mode === "straddle" && composition.need0 > 0) {
-      const n = Number(amount0);
-      if (Number.isFinite(n) && n > 0) {
-        setAmount1(trimDecimal((n * composition.need1) / composition.need0));
+  function linkDepositFromLeader(
+    leader: "base" | "quote",
+    leaderValue: string,
+    ratio: number | null
+  ) {
+    if (composition.mode === "above") {
+      if (baseIsCurrency0) {
+        setQuoteAmount("0");
+        if (leader === "base") setBaseAmount(leaderValue);
+      } else {
+        setBaseAmount("0");
+        if (leader === "quote") setQuoteAmount(leaderValue);
       }
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lowerBin, upperBin, shape]);
+    if (composition.mode === "below") {
+      if (baseIsCurrency0) {
+        setBaseAmount("0");
+        if (leader === "quote") setQuoteAmount(leaderValue);
+      } else {
+        setQuoteAmount("0");
+        if (leader === "base") setBaseAmount(leaderValue);
+      }
+      return;
+    }
+    if (composition.mode !== "straddle" || ratio == null || ratio <= 0) return;
+    const n = Number(leaderValue);
+    if (!Number.isFinite(n) || n < 0) return;
+    if (leader === "base") {
+      setBaseAmount(leaderValue);
+      setQuoteAmount(trimDecimal(n * ratio));
+    } else {
+      setQuoteAmount(leaderValue);
+      setBaseAmount(trimDecimal(n / ratio));
+    }
+  }
+
+  function handleBaseAmountChange(v: string) {
+    depositLeaderRef.current = "base";
+    linkDepositFromLeader("base", v, depositRatioQuotePerBase);
+  }
+
+  function handleQuoteAmountChange(v: string) {
+    depositLeaderRef.current = "quote";
+    linkDepositFromLeader("quote", v, depositRatioQuotePerBase);
+  }
+
+  const needsOnlyToken0 = composition.mode === "above";
+  const needsOnlyToken1 = composition.mode === "below";
+  const disableBase =
+    (needsOnlyToken0 && !baseIsCurrency0) || (needsOnlyToken1 && baseIsCurrency0);
+  const disableQuote =
+    (needsOnlyToken0 && baseIsCurrency0) || (needsOnlyToken1 && !baseIsCurrency0);
+
+  // Re-link the follower whenever price, range, or side-mode changes — respect last-edited field.
+  useEffect(() => {
+    if (composition.mode === "above") {
+      depositLeaderRef.current = baseIsCurrency0 ? "base" : "quote";
+    } else if (composition.mode === "below") {
+      depositLeaderRef.current = baseIsCurrency0 ? "quote" : "base";
+    }
+    const leader = depositLeaderRef.current;
+    const leaderVal = leader === "base" ? baseAmount : quoteAmount;
+    linkDepositFromLeader(leader, leaderVal, depositRatioQuotePerBase);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- follower only; leader value read at change time
+  }, [composition.mode, depositRatioQuotePerBase, lowerBin, upperBin, shape, compositionPrice, baseIsCurrency0]);
 
   const balQ = useReadContracts({
     query: { enabled: !!key && !!address },
@@ -383,19 +449,59 @@ export function LiquidityConsole() {
   // would let a second click race a new submission in on top of one still in flight.
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const txSummary = (amount0 !== "0" || amount1 !== "0") && base.symbol && quote.symbol
-    ? `${amount0 !== "0" ? `${amount0} ${base.symbol}` : ""}${amount0 !== "0" && amount1 !== "0" ? " + " : ""}${amount1 !== "0" ? `${amount1} ${quote.symbol}` : ""}`
-    : undefined;
+  const balBase = baseIsCurrency0 ? bal0 : bal1;
+  const balQuote = baseIsCurrency0 ? bal1 : bal0;
+  const decBase = baseIsCurrency0 ? base.decimals : quote.decimals;
+  const decQuote = baseIsCurrency0 ? quote.decimals : base.decimals;
+
+  const txSummary =
+    (baseAmount !== "0" || quoteAmount !== "0") && pickBase.symbol && pickQuote.symbol
+      ? `${baseAmount !== "0" ? `${baseAmount} ${pickBase.symbol}` : ""}${baseAmount !== "0" && quoteAmount !== "0" ? " + " : ""}${quoteAmount !== "0" ? `${quoteAmount} ${pickQuote.symbol}` : ""}`
+      : undefined;
 
   const dec0 = base.decimals;
   const dec1 = quote.decimals;
 
   const binsCovered = lowerBin !== null && upperBin !== null ? upperBin - lowerBin + 1 : null;
 
+  const binPriceLabel = (info: ReturnType<typeof binPriceInfo>) =>
+    `1 ${base.symbol ?? "token0"} = ${formatPriceHuman(info.arithmeticMean)} ${quote.symbol ?? "token1"}`;
+
+  const hoveredBinPrice = useMemo(() => {
+    if (hoveredBin === null) return null;
+    return binPriceInfo(hoveredBin, effBinSize);
+  }, [hoveredBin, effBinSize]);
+
+  const selectedRangePrice = useMemo(() => {
+    if (lowerBin === null || upperBin === null) return null;
+    const lo = binPriceInfo(lowerBin, effBinSize);
+    const hi = binPriceInfo(upperBin, effBinSize);
+    return {
+      priceMin: lo.priceLower,
+      priceMax: hi.priceUpper,
+      meanLower: lo.arithmeticMean,
+      meanUpper: hi.arithmeticMean,
+    };
+  }, [lowerBin, upperBin, effBinSize]);
+
+  const defaultRangePrice = useMemo(() => {
+    const lo = binPriceInfo(effLower, effBinSize);
+    const hi = binPriceInfo(effUpper, effBinSize);
+    return { priceMin: lo.priceLower, priceMax: hi.priceUpper };
+  }, [effLower, effUpper, effBinSize]);
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (isSubmitting) return;
-    if (!deployment || !address || !key || dec0 === undefined || dec1 === undefined || !publicClient) return;
+    if (
+      !deployment ||
+      !address ||
+      !key ||
+      dec0 === undefined ||
+      dec1 === undefined ||
+      !publicClient
+    )
+      return;
     setIsSubmitting(true);
     setStatus(null);
     setTxError(null);
@@ -430,11 +536,14 @@ export function LiquidityConsole() {
     const sendAndConfirm = async (params: Parameters<typeof writeContractAsync>[0]) => {
       // Dry-runs the call against current chain state first — surfaces the real revert reason
       // immediately, before the wallet even opens or any gas is spent, instead of only finding
-      // out after paying for a failed transaction.
-      await publicClient.simulateContract({ ...params, account: address } as Parameters<
+      // out after paying for a failed transaction. It also returns an accurate gas estimate,
+      // replacing the hardcoded caps so wide books don't run out of gas.
+      const sim = await publicClient.simulateContract({ ...params, account: address } as Parameters<
         typeof publicClient.simulateContract
       >[0]);
-      const hash = await writeContractAsync(params);
+      const estimatedGas = sim.request.gas;
+      const gas = estimatedGas ? (estimatedGas * 12n) / 10n : params.gas;
+      const hash = await writeContractAsync(gas ? { ...params, gas } : params);
       setTxHash(hash);
       // A bounded timeout so a flaky/rate-limited RPC surfaces as an error instead of spinning
       // forever — the transaction itself may still be fine on-chain even if this call times out.
@@ -493,6 +602,13 @@ export function LiquidityConsole() {
       const tickLower = tickAtBin(effLower, effBinSize);
       const tickUpper = tickAtBin(effUpper + 1, effBinSize);
 
+      // Slippage guard on the deposit: allow the pool to take slightly less of each token than
+      // desired (normal for a small price move) but revert if it would take materially less than
+      // the user asked for — otherwise a reorder could settle the deposit at any near-zero ratio.
+      const pct = Math.min(Math.max(Number(slippage) || 0.5, 0), 99);
+      const minScale = (amount: bigint) =>
+        amount > 0n ? (amount * BigInt(Math.round((100 - pct) * 100))) / 10_000n : 0n;
+
       const addLiquidityParams = {
         address: deployment.binBook,
         abi: binBookAbi,
@@ -502,8 +618,8 @@ export function LiquidityConsole() {
           {
             amount0Desired: a0,
             amount1Desired: a1,
-            amount0Min: 0n,
-            amount1Min: 0n,
+            amount0Min: minScale(a0),
+            amount1Min: minScale(a1),
             deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
             tickLower,
             tickUpper,
@@ -513,10 +629,16 @@ export function LiquidityConsole() {
         gas: 3_000_000n,
       } as const;
 
-      await publicClient.simulateContract({ ...addLiquidityParams, account: address } as Parameters<
-        typeof publicClient.simulateContract
-      >[0]);
-      const addLiqHash = await writeContractAsync(addLiquidityParams);
+      const addLiqSim = await publicClient.simulateContract({
+        ...addLiquidityParams,
+        account: address,
+      } as Parameters<typeof publicClient.simulateContract>[0]);
+      // Use the simulated gas estimate (+10% headroom) instead of the hardcoded cap, so wide
+      // books / many-bin deposits don't hit OutOfGas.
+      const addLiqGas = addLiqSim.request.gas
+        ? (addLiqSim.request.gas * 12n) / 10n
+        : addLiquidityParams.gas;
+      const addLiqHash = await writeContractAsync({ ...addLiquidityParams, gas: addLiqGas });
       setTxSteps((prev) => prev.map((s) => ({ ...s, done: true })));
       setTxHash(addLiqHash);
       setTxModalStatus("confirming");
@@ -601,8 +723,8 @@ export function LiquidityConsole() {
           </div>
           <p className="new-pool-hint">
             Initializes the {base.symbol ?? "token0"} / {quote.symbol ?? "token1"} pool at this
-            price, locks the bin size, then deposits the amounts below as the first bins of the
-            ramp — one confirmation flow instead of a separate create-pool page.
+            price, locks the bin size, then deposits the amounts below as the first bins of the ramp
+            — one confirmation flow instead of a separate create-pool page.
           </p>
         </div>
       )}
@@ -621,7 +743,8 @@ export function LiquidityConsole() {
             {!preview && (
               <span className="ramp-price-chip mono">
                 1 {base.symbol ?? "token0"} ={" "}
-                {formatPriceHuman(needsCreate ? previewPrice : (bookPrice ?? 1))} {quote.symbol ?? "token1"}
+                {formatPriceHuman(needsCreate ? previewPrice : (bookPrice ?? 1))}{" "}
+                {quote.symbol ?? "token1"}
               </span>
             )}
           </div>
@@ -641,11 +764,13 @@ export function LiquidityConsole() {
                   b.binIndex >= lowerBin &&
                   b.binIndex <= upperBin;
                 const clickable = !showDemo;
+                const info = binPriceInfo(b.binIndex, effBinSize);
                 const cls = [
                   "ramp-bar",
                   isCurrent ? "current" : "",
                   inRange ? "in-range" : "",
                   clickable ? "clickable" : "",
+                  hoveredBin === b.binIndex ? "hovered" : "",
                 ]
                   .filter(Boolean)
                   .join(" ");
@@ -654,8 +779,14 @@ export function LiquidityConsole() {
                     key={b.binIndex}
                     className={cls}
                     style={{ height: `${Math.max(pct, b.liquidity > 0n ? 6 : 0)}%` }}
-                    title={`bin ${b.binIndex} · liquidity ${b.liquidity.toString()}`}
+                    title={
+                      clickable
+                        ? `bin ${b.binIndex}\n${binPriceLabel(info)}\nedges ${formatPriceHuman(info.priceLower)} – ${formatPriceHuman(info.priceUpper)}`
+                        : `bin ${b.binIndex} · ${binPriceLabel(info)}`
+                    }
                     onClick={clickable ? () => handleSelectBin(b.binIndex) : undefined}
+                    onMouseEnter={clickable ? () => setHoveredBin(b.binIndex) : undefined}
+                    onMouseLeave={clickable ? () => setHoveredBin(null) : undefined}
                     role={clickable ? "button" : undefined}
                     tabIndex={clickable ? 0 : undefined}
                   />
@@ -663,20 +794,48 @@ export function LiquidityConsole() {
               })}
             </div>
           </div>
+          {hoveredBinPrice && !showDemo && (
+            <p className="ramp-bin-price mono">
+              Bin <b>{hoveredBin}</b> · mean {formatPriceHuman(hoveredBinPrice.arithmeticMean)}{" "}
+              {quote.symbol ?? "token1"} / {base.symbol ?? "token0"} · edges{" "}
+              {formatPriceHuman(hoveredBinPrice.priceLower)} –{" "}
+              {formatPriceHuman(hoveredBinPrice.priceUpper)}
+            </p>
+          )}
           <div className="ramp-axis">
-            <span>lower book edge</span>
-            <span>upper book edge</span>
+            <span>
+              lower · {formatPriceHuman((selectedRangePrice ?? defaultRangePrice).priceMin)}{" "}
+              {quote.symbol ?? "token1"}/{base.symbol ?? "token0"}
+            </span>
+            <span>
+              upper · {formatPriceHuman((selectedRangePrice ?? defaultRangePrice).priceMax)}{" "}
+              {quote.symbol ?? "token1"}/{base.symbol ?? "token0"}
+            </span>
           </div>
 
           <p className="ramp-caption">
             {binsCovered !== null ? (
               <>
                 Bins <b>{lowerBin}</b> to <b>{upperBin}</b> selected ({binsCovered} bins)
+                {selectedRangePrice && (
+                  <>
+                    {" "}
+                    · price {formatPriceHuman(selectedRangePrice.priceMin)} –{" "}
+                    {formatPriceHuman(selectedRangePrice.priceMax)} {quote.symbol ?? "token1"} per{" "}
+                    {base.symbol ?? "token0"}
+                  </>
+                )}
               </>
             ) : (
-              <>Default ramp window around the active bin</>
+              <>
+                Default ramp window around the active bin
+                {" · price "}
+                {formatPriceHuman(defaultRangePrice.priceMin)} –{" "}
+                {formatPriceHuman(defaultRangePrice.priceMax)} {quote.symbol ?? "token1"} per{" "}
+                {base.symbol ?? "token0"}
+              </>
             )}
-            {" · liquidity decays away from the active bin, so the ramp itself is the shape of your position."}
+            {" · per-bin mean = average of that bin's lower and upper edge prices (1.0001^tick)."}
           </p>
 
           <div className="shape-row">
@@ -713,7 +872,11 @@ export function LiquidityConsole() {
             >
               Full book
             </button>
-            <button type="button" className={shape === "custom" ? "shape-pill active" : "shape-pill"} disabled>
+            <button
+              type="button"
+              className={shape === "custom" ? "shape-pill active" : "shape-pill"}
+              disabled
+            >
               Custom
             </button>
           </div>
@@ -748,25 +911,25 @@ export function LiquidityConsole() {
           {composition.mode === "above" && (
             <p className="new-pool-hint" style={{ marginBottom: "0.6rem" }}>
               This range sits entirely above the spot price — it only takes{" "}
-              {base.symbol ?? "token0"}.
+              {baseIsCurrency0 ? (pickBase.symbol ?? "base") : (pickQuote.symbol ?? "quote")}.
             </p>
           )}
           {composition.mode === "below" && (
             <p className="new-pool-hint" style={{ marginBottom: "0.6rem" }}>
               This range sits entirely below the spot price — it only takes{" "}
-              {quote.symbol ?? "token1"}.
+              {baseIsCurrency0 ? (pickQuote.symbol ?? "quote") : (pickBase.symbol ?? "base")}.
             </p>
           )}
 
           <TokenAmountField
-            tokenAddress={key?.currency0 ?? baseAddr ?? ZERO_ADDRESS}
-            onSelectToken={(a) => selectAt(currency0Slot, a)}
+            tokenAddress={baseAddr ?? key?.currency0 ?? ZERO_ADDRESS}
+            onSelectToken={(a) => selectAt("base", a)}
             extraTokens={extraTokens}
-            amount={amount0}
-            onAmount={handleAmount0Change}
-            balance={bal0}
-            decimals={dec0}
-            disabled={composition.mode === "below"}
+            amount={baseAmount}
+            onAmount={handleBaseAmountChange}
+            balance={balBase}
+            decimals={decBase}
+            disabled={disableBase}
           />
 
           <div className="plus-divider">
@@ -774,14 +937,14 @@ export function LiquidityConsole() {
           </div>
 
           <TokenAmountField
-            tokenAddress={key?.currency1 ?? quoteAddr ?? ZERO_ADDRESS}
-            onSelectToken={(a) => selectAt(currency1Slot, a)}
+            tokenAddress={quoteAddr ?? key?.currency1 ?? ZERO_ADDRESS}
+            onSelectToken={(a) => selectAt("quote", a)}
             extraTokens={extraTokens}
-            amount={amount1}
-            onAmount={handleAmount1Change}
-            balance={bal1}
-            decimals={dec1}
-            disabled={composition.mode === "above"}
+            amount={quoteAmount}
+            onAmount={handleQuoteAmountChange}
+            balance={balQuote}
+            decimals={decQuote}
+            disabled={disableQuote}
           />
 
           <details className="details" open>
@@ -797,17 +960,35 @@ export function LiquidityConsole() {
                 <span>Deposit ratio</span>
                 <span>
                   {composition.mode === "above"
-                    ? `${base.symbol ?? "token0"} only`
+                    ? `${baseIsCurrency0 ? pickBase.symbol : pickQuote.symbol} only`
                     : composition.mode === "below"
-                      ? `${quote.symbol ?? "token1"} only`
-                      : composition.mode === "straddle"
-                        ? `1 : ${formatPriceHuman(composition.need1 / composition.need0)}`
+                      ? `${baseIsCurrency0 ? pickQuote.symbol : pickBase.symbol} only`
+                      : composition.mode === "straddle" && depositRatioQuotePerBase != null
+                        ? `1 ${pickBase.symbol ?? "base"} : ${formatPriceHuman(depositRatioQuotePerBase)} ${pickQuote.symbol ?? "quote"}`
                         : "—"}
                 </span>
               </div>
               <div className="detail-row">
                 <span>Range</span>
                 <span>{binsCovered !== null ? `${binsCovered} bins` : "Auto"}</span>
+              </div>
+              <div className="detail-row">
+                <span>Max slippage</span>
+                <span>
+                  <input
+                    value={slippage}
+                    onChange={(e) => setSlippage(e.target.value)}
+                    style={{
+                      width: "3.5rem",
+                      background: "transparent",
+                      border: "0",
+                      color: "inherit",
+                      textAlign: "right",
+                    }}
+                    aria-label="Slippage percent"
+                  />
+                  %
+                </span>
               </div>
             </div>
           </details>

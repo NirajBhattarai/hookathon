@@ -1,13 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import {
-  encodeAbiParameters,
-  formatUnits,
-  keccak256,
-  parseUnits,
-  type Address,
-} from "viem";
+import { encodeAbiParameters, formatUnits, keccak256, parseUnits, type Address } from "viem";
 import {
   useAccount,
   useReadContract,
@@ -16,6 +10,9 @@ import {
   useWriteContract,
 } from "wagmi";
 import { useDeployment } from "@/hooks/useDeployment";
+import { useAppPublicClient } from "@/hooks/useAppPublicClient";
+import { sameAddress, useTradePair } from "@/context/TradePairContext";
+import { asInt128 } from "@/lib/balanceDelta";
 import { AllowancePrompt } from "@/components/AllowancePrompt";
 import { AllowancesModal } from "@/components/AllowancesModal";
 import { TokenSelect } from "@/components/TokenSelect";
@@ -68,7 +65,9 @@ const binQuoterAbi = [
 ] as const;
 
 /** Decode Quote(int128,int128) out of a reverted eth_call. viem puts parsed args on a nested
- *  cause's `.data`; fall back to scanning raw revert hex anywhere on the error chain. */
+ *  cause's `.data`; fall back to scanning raw revert hex anywhere on the error chain. Both paths
+ *  are normalized to proper signed int128 values before returning, so the consumer never has to
+ *  guess at the encoding. */
 function parseQuoteDelta(err: unknown): readonly [bigint, bigint] | null {
   let c: unknown = err;
   for (let depth = 0; c && depth < 8; depth++) {
@@ -81,7 +80,7 @@ function parseQuoteDelta(err: unknown): readonly [bigint, bigint] | null {
     const d = e.data;
     if (d) {
       const args = (d as { args?: readonly [bigint, bigint] }).args;
-      if (args && args.length === 2) return [BigInt(args[0]), BigInt(args[1])];
+      if (args && args.length === 2) return [asInt128(BigInt(args[0])), asInt128(BigInt(args[1]))];
       const hex =
         typeof d === "string"
           ? d
@@ -89,19 +88,13 @@ function parseQuoteDelta(err: unknown): readonly [bigint, bigint] | null {
             ? (d as { data: string }).data
             : "";
       const m = /0xd391f9d4([0-9a-fA-F]{128})/.exec(hex);
-      if (m) return [BigInt(`0x${m[1].slice(0, 32)}`), BigInt(`0x${m[1].slice(32)}`)];
+      if (m) return [asInt128(BigInt(`0x${m[1].slice(0, 32)}`)), asInt128(BigInt(`0x${m[1].slice(32)}`))];
     }
     const m = /0xd391f9d4([0-9a-fA-F]{128})/.exec(`${e.raw ?? ""} ${e.message ?? ""}`);
-    if (m) return [BigInt(`0x${m[1].slice(0, 32)}`), BigInt(`0x${m[1].slice(32)}`)];
+    if (m) return [asInt128(BigInt(`0x${m[1].slice(0, 32)}`)), asInt128(BigInt(`0x${m[1].slice(32)}`))];
     c = e.cause;
   }
   return null;
-}
-
-const I128_MAX = (1n << 127n) - 1n;
-/** Interpret an ABI-encoded int128 as a signed bigint. */
-function asInt(v: bigint): bigint {
-  return v > I128_MAX ? v - (1n << 256n) : v;
 }
 
 const swapRouterAbi = [
@@ -188,6 +181,7 @@ const erc20MetaAbi = [
 export function SwapForm() {
   const { address, isConnected } = useAccount();
   const { deployment } = useDeployment();
+  const { setTradePair } = useTradePair();
 
   // default: stablecoin in, WETH out (changeable via selectors)
   const [inAddr, setInAddr] = useState<Address>(() => findToken("USDC").address);
@@ -199,7 +193,7 @@ export function SwapForm() {
 
   // sorted pair + candidate keys over common tickSpacings (discovered on-chain, not env-guessed)
   const [c0, c1] = useMemo((): readonly [Address?, Address?] => {
-    if (!deployment || inAddr === outAddr) return [undefined, undefined];
+    if (!deployment || sameAddress(inAddr, outAddr)) return [undefined, undefined];
     return inAddr.toLowerCase() < outAddr.toLowerCase() ? [inAddr, outAddr] : [outAddr, inAddr];
   }, [deployment, inAddr, outAddr]);
 
@@ -231,7 +225,11 @@ export function SwapForm() {
   // probe BinBook.initializedPools(poolId) for every candidate — set true inside createPool(),
   // the only source of truth for "has this exact poolId actually been created".
   const discoverQ = useReadContracts({
-    query: { enabled: !!deployment && !!c0 && !!c1 },
+    query: {
+      enabled: !!deployment && !!c0 && !!c1,
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
+    },
     contracts: tickCandidates.map((ts) => ({
       address: deployment!.binBook,
       abi: [
@@ -267,7 +265,26 @@ export function SwapForm() {
       hooks: deployment.binBook,
     };
   }, [deployment, c0, c1, discoveredTickSpacing]);
-  const zeroForOne = !!key && inAddr === key.currency0;
+  const zeroForOne = !!key && sameAddress(inAddr, key.currency0);
+
+  useEffect(() => {
+    if (!c0 || !c1) {
+      setTradePair(null, true);
+      return;
+    }
+    if (discoverQ.isPending) {
+      setTradePair({ token0: c0, token1: c1 }, false);
+      return;
+    }
+    setTradePair(
+      {
+        token0: c0,
+        token1: c1,
+        tickSpacing: discoveredTickSpacing,
+      },
+      true
+    );
+  }, [c0, c1, discoveredTickSpacing, discoverQ.isPending, setTradePair]);
 
   const payToken = inAddr;
   const recvToken = outAddr;
@@ -280,24 +297,29 @@ export function SwapForm() {
         ? [
             { address: c0, abi: erc20MetaAbi, functionName: "symbol" },
             { address: c0, abi: erc20MetaAbi, functionName: "decimals" },
-            { address: c0, abi: erc20MetaAbi, functionName: "balanceOf", args: [address!] },
             { address: c1, abi: erc20MetaAbi, functionName: "symbol" },
             { address: c1, abi: erc20MetaAbi, functionName: "decimals" },
-            { address: c1, abi: erc20MetaAbi, functionName: "balanceOf", args: [address!] },
+            ...(address
+              ? [
+                  { address: c0, abi: erc20MetaAbi, functionName: "balanceOf", args: [address] },
+                  { address: c1, abi: erc20MetaAbi, functionName: "balanceOf", args: [address] },
+                ]
+              : []),
           ]
         : [],
   });
-  // metaQ slots are ordered by SORTED currency0/currency1 — index directly, no direction swap
-  const slotOf = (a: Address) => (a === c0 ? 0 : 3);
+  const slotOf = (a: Address) => (sameAddress(a, c0) ? 0 : 2);
   const symOf = (a: Address) => metaQ.data?.[slotOf(a)]?.result as string | undefined;
   const decOf = (a: Address) => metaQ.data?.[slotOf(a) + 1]?.result as number | undefined;
-  const balOf = (a: Address) => metaQ.data?.[slotOf(a) + 2]?.result as bigint | undefined;
+  const balOf = (a: Address) =>
+    address ? (metaQ.data?.[sameAddress(a, c0) ? 4 : 5]?.result as bigint | undefined) : undefined;
 
   const paySymbol = symOf(payToken) ?? tokenByAddress(payToken)?.symbol;
   const recvSymbol = symOf(recvToken) ?? tokenByAddress(recvToken)?.symbol;
   const payDecimals = decOf(payToken) ?? tokenByAddress(payToken)?.decimals;
   const recvDecimals = decOf(recvToken) ?? tokenByAddress(recvToken)?.decimals;
   const payBalance = balOf(payToken);
+  const recvBalance = balOf(recvToken);
 
   const amountInRaw = useMemo(() => {
     try {
@@ -333,18 +355,18 @@ export function SwapForm() {
   const quoteErrorText = useMemo(() => {
     const e = quoteQ.error;
     if (!e) return null;
+    if (parseQuoteDelta(e)) return null;
     const s = `${(e as { name?: string }).name ?? ""} ${e.message}`;
     if (/InsufficientLiquidity|PoolNotConfigured|PoolNotInitialized|CurrencyNotSettled/i.test(s))
       return "NO_LIQUIDITY";
-    // WrappedError(address,bytes4,bytes,bytes) 0x90bfb865: hook engine ran out of bins
-    if (/0x90bfb865|WrappedError/i.test(s) || !parseQuoteDelta(e)) return "TOO_LARGE";
-    return null;
+    if (/0x90bfb865|WrappedError/i.test(s)) return "TOO_LARGE";
+    return "QUOTE_FAILED";
   }, [quoteQ.error]);
 
   const estimatedOutRaw = useMemo(() => {
     const deltas = parseQuoteDelta(quoteQ.error);
     if (!deltas) return 0n;
-    const out = asInt(zeroForOne ? deltas[1] : deltas[0]);
+    const out = asInt128(zeroForOne ? deltas[1] : deltas[0]);
     return out > 0n ? out : 0n;
   }, [quoteQ.error, zeroForOne]);
 
@@ -370,8 +392,11 @@ export function SwapForm() {
   const erc20ToRouter = (allowQ.data?.[0]?.result as bigint | undefined) ?? 0n;
 
   const { writeContractAsync, isPending } = useWriteContract();
+  const publicClient = useAppPublicClient(deployment);
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
-  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash ?? undefined });
+  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({
+    hash: txHash ?? undefined,
+  });
 
   const [txModalOpen, setTxModalOpen] = useState(false);
   const [txModalStatus, setTxModalStatus] = useState<TxStatus>("pending");
@@ -399,12 +424,12 @@ export function SwapForm() {
   }
 
   function selectIn(a: Address) {
-    if (a === outAddr) setOutAddr(inAddr);
+    if (sameAddress(a, outAddr)) setOutAddr(inAddr);
     setInAddr(a);
     setAmountIn("");
   }
   function selectOut(a: Address) {
-    if (a === inAddr) setInAddr(outAddr);
+    if (sameAddress(a, inAddr)) setInAddr(outAddr);
     setOutAddr(a);
   }
 
@@ -414,7 +439,7 @@ export function SwapForm() {
   const ctaLabel = useMemo(() => {
     if (!isConnected) return "Connect wallet";
     if (isPending || confirming) return "Confirm in wallet…";
-    if (inAddr === outAddr) return "Pick two different tokens";
+    if (sameAddress(inAddr, outAddr)) return "Pick two different tokens";
     if (!amountIn || Number(amountIn) <= 0) return "Enter an amount";
     if (noPool) return "No pool for this pair";
     if (quoteErrorText === "NO_LIQUIDITY") return "No liquidity";
@@ -424,7 +449,8 @@ export function SwapForm() {
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!deployment || !key || !address || amountInRaw === 0n || inAddr === outAddr) return;
+    if (!deployment || !key || !address || amountInRaw === 0n || sameAddress(inAddr, outAddr))
+      return;
     if (needsApproval) {
       // let the user choose unlimited vs. this-swap-only before anything is signed
       setAllowancePromptOpen(true);
@@ -434,7 +460,8 @@ export function SwapForm() {
   }
 
   async function runSwap(approveAmount?: bigint): Promise<void> {
-    if (!deployment || !key || !address || amountInRaw === 0n || inAddr === outAddr) return;
+    if (!deployment || !key || !address || amountInRaw === 0n || sameAddress(inAddr, outAddr))
+      return;
     setStatus(null);
     setSwapError(null);
     setTxError(null);
@@ -448,32 +475,50 @@ export function SwapForm() {
     setTxSteps(doApprove ? [approvalStep, swapStep] : [swapStep]);
 
     try {
+      const swapArgs = [
+        amountInRaw,
+        minOutRaw,
+        zeroForOne,
+        key,
+        "0x",
+        address,
+        BigInt(Math.floor(Date.now() / 1000) + 600),
+      ] as const;
+
       if (doApprove && payToken) {
         // router04 pulls input tokens via ERC20 transferFrom: approve router directly
-        await writeContractAsync({
+        const approveParams = {
           address: payToken,
           abi: erc20MetaAbi,
-          functionName: "approve",
-          args: [deployment.swapRouter, approveAmount],
-        });
+          functionName: "approve" as const,
+          args: [deployment.swapRouter, approveAmount] as readonly [Address, bigint],
+        };
+        const approveSim = publicClient
+          ? await publicClient.simulateContract({ ...approveParams, account: address })
+          : null;
+        const approveGas = approveSim?.request.gas
+          ? (approveSim.request.gas * 12n) / 10n
+          : undefined;
+        await writeContractAsync(
+          approveGas ? { ...approveParams, gas: approveGas } : approveParams
+        );
         await allowQ.refetch();
         setTxSteps((prev) => prev.map((s, i) => (i === 0 ? { ...s, done: true } : s)));
       }
-      const hash = await writeContractAsync({
+
+      // Simulate the swap to surface revert reasons immediately and get an accurate gas estimate
+      // (replacing the hardcoded cap) rather than paying for a failure.
+      const swapParams = {
         address: deployment.swapRouter,
         abi: swapRouterAbi,
-        functionName: "swapExactTokensForTokens",
-        gas: 1_500_000n,
-        args: [
-          amountInRaw,
-          minOutRaw,
-          zeroForOne,
-          key,
-          "0x",
-          address,
-          BigInt(Math.floor(Date.now() / 1000) + 600),
-        ],
-      });
+        functionName: "swapExactTokensForTokens" as const,
+        args: swapArgs,
+      };
+      const swapSim = publicClient
+        ? await publicClient.simulateContract({ ...swapParams, account: address })
+        : null;
+      const swapGas = swapSim?.request.gas ? (swapSim.request.gas * 12n) / 10n : 1_500_000n;
+      const hash = await writeContractAsync({ ...swapParams, gas: swapGas });
       setTxSteps((prev) => prev.map((s) => ({ ...s, done: true })));
       setTxHash(hash);
       setTxModalStatus("confirming");
@@ -482,9 +527,7 @@ export function SwapForm() {
       const msg =
         err instanceof Error ? `${err.message} ${(err as { data?: unknown }).data ?? ""}` : "";
       if (/InsufficientLiquidity|PoolNotConfigured|PoolNotInitialized/i.test(msg)) {
-        setTxError(
-          `No ${paySymbol}/${recvSymbol} pool with liquidity yet — add liquidity first.`
-        );
+        setTxError(`No ${paySymbol}/${recvSymbol} pool with liquidity yet — add liquidity first.`);
         setSwapError(
           `No ${paySymbol}/${recvSymbol} pool with liquidity yet — add liquidity first.`
         );
@@ -505,9 +548,10 @@ export function SwapForm() {
     return v.toFixed(dp).replace(/\.?0+$/, "");
   }, [estimatedOutRaw, recvDecimals]);
 
-  const txSummary = amountIn && paySymbol && recvSymbol && fmtOut !== "—"
-    ? `${amountIn} ${paySymbol} → ${fmtOut} ${recvSymbol}`
-    : undefined;
+  const txSummary =
+    amountIn && paySymbol && recvSymbol && fmtOut !== "—"
+      ? `${amountIn} ${paySymbol} → ${fmtOut} ${recvSymbol}`
+      : undefined;
 
   return (
     <form className="swap-card" onSubmit={onSubmit}>
@@ -550,7 +594,7 @@ export function SwapForm() {
           />
           <TokenSelect value={inAddr} onSelect={selectIn} />
         </div>
-        <div className="fiat-hint">≈ $—</div>
+        <div className="fiat-hint">amount to sell</div>
       </div>
 
       <div className="swap-flip-wrap">
@@ -562,7 +606,14 @@ export function SwapForm() {
       <div className="token-field">
         <div className="token-field-top">
           <span>You receive</span>
-          <span>Balance —</span>
+          <span>
+            Balance{" "}
+            {recvBalance !== undefined && recvDecimals !== undefined
+              ? Number(formatUnits(recvBalance, recvDecimals)).toLocaleString(undefined, {
+                  maximumFractionDigits: 4,
+                })
+              : "—"}
+          </span>
         </div>
         <div className="token-field-row">
           <input value={fmtOut} readOnly tabIndex={-1} aria-label="Amount out estimate" />
@@ -581,18 +632,6 @@ export function SwapForm() {
           <span>Details</span>
         </summary>
         <div className="details-body">
-          {amountInRaw > 0n && fmtOut === "—" && (
-            <div className="detail-row" style={{ color: "#f66", wordBreak: "break-all" }}>
-              <span>quote debug</span>
-              <span style={{ textAlign: "right" }}>
-                {String(
-                  quoteErrorText ??
-                    quoteQ.error?.message?.slice(0, 220) ??
-                    "no error object — quote pending"
-                )}
-              </span>
-            </div>
-          )}
           <div className="detail-row">
             <span>Fee tier</span>
             <span>{((deployment?.poolFee ?? 3000) / 10000).toFixed(2)}%</span>
@@ -639,7 +678,7 @@ export function SwapForm() {
           confirming ||
           !amountIn ||
           Number(amountIn) <= 0 ||
-          inAddr === outAddr ||
+          sameAddress(inAddr, outAddr) ||
           quoteErrorText === "NO_LIQUIDITY" ||
           quoteErrorText === "TOO_LARGE" ||
           noPool
@@ -668,10 +707,8 @@ export function SwapForm() {
         </p>
       )}
 
-      {quoteErrorText === "TOO_LARGE" && (
-        <p className="status warn">
-          Quote failed — amount exceeds available pool liquidity. Try a smaller amount.
-        </p>
+      {quoteErrorText === "QUOTE_FAILED" && amountInRaw > 0n && (
+        <p className="status warn">Could not quote this swap — try again in a moment.</p>
       )}
 
       {swapError && <p className="status warn">{swapError}</p>}

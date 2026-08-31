@@ -35,6 +35,9 @@ contract AddLiquidity is BinBookBase {
             binBook.createPool(key, Constants.SQRT_PRICE_1_1, d.tickSpacing);
         }
 
+        // Default ramp window around spot (binSize = tickSpacing here): curBin ± 10.
+        // tickLower=0/tickUpper=0 is invalid — resolveWindow requires tickLower < tickUpper.
+        int24 bs = d.tickSpacing;
         binBook.addLiquidity(
             key,
             BaseCustomAccounting.AddLiquidityParams({
@@ -43,8 +46,8 @@ contract AddLiquidity is BinBookBase {
                 amount0Min: 0,
                 amount1Min: 0,
                 deadline: block.timestamp + 600,
-                tickLower: 0,
-                tickUpper: 0,
+                tickLower: -10 * bs,
+                tickUpper: 10 * bs,
                 userInputSalt: bytes32(0)
             })
         );
