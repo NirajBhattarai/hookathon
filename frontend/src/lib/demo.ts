@@ -12,6 +12,7 @@ export const DEMO_BOOK = {
   maxBin: 9,
   sqrtPriceX96: priceToSqrtPriceX96(1),
   configured: true,
+  seeded: true,
 } as const;
 
 export function demoDepthSeries(): BinDepth[] {

@@ -8,23 +8,26 @@ import { useDeployment } from "./useDeployment";
 /** Bounds the scan so a long-lived chain (Sepolia is already 11M+ blocks) doesn't turn "find my
  *  pools" into thousands of chunked eth_getLogs calls. Converted to a time window from the
  *  chain's measured block time, capped by hard block limits for RPC safety. */
-const POOL_SCAN_SECONDS = 30 * 24 * 60 * 60; // ~30 days of history
-const POOL_SCAN_MAX_BLOCKS = 2_000_000n;
+const POOL_SCAN_SECONDS = 7 * 24 * 60 * 60; // ~7 days — enough for portfolio discovery without huge log scans
+const POOL_SCAN_MAX_BLOCKS = 400_000n;
 
 /**
  * Every pool created against the connected chain's BinBook in the recent history window —
  * discovered by scanning `PoolCreated` logs directly from the RPC, not a database. Powers the
  * portfolio's "find every position this wallet holds" scan without needing to know pairs up front.
  */
-export function usePools() {
+export function usePools(enabledOverride = true) {
   const { deployment, ready, chainId } = useDeployment();
   const client = useAppPublicClient(deployment);
-  const enabled = ready && !!deployment && !!client;
+  const enabled = enabledOverride && ready && !!deployment && !!client;
 
   const query = useQuery({
     queryKey: ["created-pools", chainId, deployment?.binBook],
     enabled,
-    staleTime: 30_000,
+    staleTime: 60_000,
+    gcTime: 10 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchIntervalInBackground: false,
     queryFn: async (): Promise<CreatedPool[]> => {
       const c = client!;
       const latest = await c.getBlockNumber();

@@ -1519,6 +1519,22 @@ input {
   backdrop-filter: blur(6px);
 }
 
+.wallet-gate-overlay {
+  z-index: 90;
+}
+
+.wallet-gate-content[aria-hidden="true"] {
+  pointer-events: none;
+  user-select: none;
+  filter: blur(5px);
+  opacity: 0.28;
+}
+
+.wallet-gate-modal .cta {
+  width: 100%;
+  margin-top: 0.25rem;
+}
+
 .tx-modal {
   position: relative;
   width: min(92vw, 380px);

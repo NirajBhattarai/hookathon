@@ -5,6 +5,7 @@ import { createAppKit } from "@reown/appkit/react";
 import { type ReactNode, useState } from "react";
 import { cookieToInitialState, WagmiProvider, type Config } from "wagmi";
 import { defaultNetwork, metadata, networks, projectId, wagmiAdapter } from "@/config";
+import { WalletReconnect } from "@/components/WalletReconnect";
 
 createAppKit({
   adapters: [wagmiAdapter],
@@ -28,12 +29,28 @@ export function ContextProvider({
   children: ReactNode;
   cookies: string | null;
 }) {
-  const [queryClient] = useState(() => new QueryClient());
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 30_000,
+            gcTime: 5 * 60_000,
+            refetchOnWindowFocus: false,
+            refetchOnReconnect: false,
+            retry: 1,
+          },
+        },
+      })
+  );
   const initialState = cookieToInitialState(wagmiAdapter.wagmiConfig as Config, cookies);
 
   return (
     <WagmiProvider config={wagmiAdapter.wagmiConfig as Config} initialState={initialState}>
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        <WalletReconnect />
+        {children}
+      </QueryClientProvider>
     </WagmiProvider>
   );
 }

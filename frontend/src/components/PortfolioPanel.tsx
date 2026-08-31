@@ -3,11 +3,13 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { formatUnits, type Address } from "viem";
-import { useAccount, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { useAccount, useWaitForTransactionReceipt } from "wagmi";
+import { useContractWrite } from "@/hooks/useContractWrite";
 import { binBookAbi } from "@/lib/abi/binBook";
 import { TokenAvatar, TokenSelect } from "@/components/TokenSelect";
 import { TxModal, type TxStatus } from "@/components/TxModal";
 import { useDeployment } from "@/hooks/useDeployment";
+import { useIdleReady } from "@/hooks/useIdleReady";
 import { usePairPosition } from "@/hooks/usePairPosition";
 import { usePool } from "@/hooks/usePool";
 import { usePositions, type Position } from "@/hooks/usePositions";
@@ -47,7 +49,7 @@ function PositionCard({ position, onChanged }: { position: Position; onChanged: 
   const [modalError, setModalError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
 
-  const { writeContractAsync, isPending } = useWriteContract();
+  const { writeContractAsync, isPending } = useContractWrite();
   const { isLoading: confirming } = useWaitForTransactionReceipt({ hash: txHash ?? undefined });
 
   const price = position.sqrtPriceX96 > 0n ? sqrtPriceX96ToPrice(position.sqrtPriceX96) : null;
@@ -292,7 +294,8 @@ function PositionSkeleton() {
 export function PortfolioPanel() {
   const { isConnected } = useAccount();
   const { deployment } = useDeployment();
-  const { positions, isLoading, refetch } = usePositions();
+  const deferPoolScan = useIdleReady(600);
+  const { positions, isLoading, refetch } = usePositions(isConnected && deferPoolScan);
 
   // Pair picker — defaults to the deployment's configured pair, but any two tokens can be
   // targeted directly instead of waiting on the full-history pool scan to surface them.

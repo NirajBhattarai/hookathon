@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { useBook } from "@/hooks/useBook";
 import { useDeployment } from "@/hooks/useDeployment";
+import { useIdleReady } from "@/hooks/useIdleReady";
 import { usePool } from "@/hooks/usePool";
 import { useSwapActivity } from "@/hooks/useSwapActivity";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
@@ -48,7 +49,8 @@ export function StatsBar() {
   const quote = useTokenMeta(tradePair?.token1 ?? key?.currency1);
   const quoteDecimals = quote.decimals ?? 18;
 
-  const { events, isLoading: activityLoading } = useSwapActivity("1D");
+  const deferLogs = useIdleReady(500);
+  const { events, isLoading: activityLoading } = useSwapActivity("1D", { enabled: deferLogs });
   const liveStats = useMemo(() => computeStats(events, quoteDecimals), [events, quoteDecimals]);
   const statsPending = !preview && (!pairResolved || activityLoading);
   const stats = preview ? demoStats() : liveStats;

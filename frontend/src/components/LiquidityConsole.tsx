@@ -2,9 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { formatUnits, maxUint256, parseUnits, type Address } from "viem";
-import { useAccount, useReadContracts, useWriteContract } from "wagmi";
+import { useAccount, useReadContracts } from "wagmi";
+import { useContractWrite } from "@/hooks/useContractWrite";
 import { binBookAbi } from "@/lib/abi/binBook";
-import { StatsBar } from "@/components/StatsBar";
 import { TokenSelect } from "@/components/TokenSelect";
 import { TxModal, type TxStatus, type TxStep } from "@/components/TxModal";
 import { useAppPublicClient } from "@/hooks/useAppPublicClient";
@@ -22,7 +22,16 @@ import {
   DEFAULT_RAMP,
   tickAtBin,
 } from "@/lib/bins";
-import { formatPriceHuman, priceToSqrtPriceX96, sqrtPriceX96ToPrice } from "@/lib/priceMath";
+import {
+  formatPriceHuman,
+  priceToSqrtPriceX96,
+  sqrtPriceX96ToPrice,
+  poolPriceFromQuotePerBase,
+  humanPoolPriceToRaw,
+  rawPoolPriceToQuotePerBase,
+  quotePerBaseToRawPoolPrice,
+} from "@/lib/priceMath";
+import { unpackBalanceDelta } from "@/lib/balanceDelta";
 import type { FaucetToken } from "@/lib/tokens";
 
 const erc20Abi = [
@@ -196,13 +205,15 @@ export function LiquidityConsole() {
   ]);
 
   const { key } = usePool(pair);
-  const { book, preview } = useBook(pair);
+  const { book, preview, refetch: refetchBook } = useBook(pair);
   const { series: liveSeries, maxL: liveMaxL } = useBinLiquidity(pair);
 
-  const base = useTokenMeta(key?.currency0);
-  const quote = useTokenMeta(key?.currency1);
+  const currency0Meta = useTokenMeta(key?.currency0);
+  const currency1Meta = useTokenMeta(key?.currency1);
   const pickBase = useTokenMeta(baseAddr ?? key?.currency0);
   const pickQuote = useTokenMeta(quoteAddr ?? key?.currency1);
+  const dec0 = currency0Meta.decimals;
+  const dec1 = currency1Meta.decimals;
 
   const baseIsCurrency0 = useMemo(() => {
     if (!key || !baseAddr) return true;
@@ -240,54 +251,80 @@ export function LiquidityConsole() {
   }
 
   const needsCreate = !!book && !preview && !book.configured;
-  const showDemo = preview || needsCreate;
+  const needsSeed = Boolean(book?.configured && !book.seeded);
+  const showDemoRamp = preview || needsCreate;
+  const rampInteractive = !preview;
 
   const previewBinSize = Number(binSize) || 60;
-  const rampPreview = useMemo(() => buildRampPreview(previewBinSize), [previewBinSize]);
+  const userStartingPrice = Number(startingPrice) > 0 ? Number(startingPrice) : 1;
+  const humanPoolPrice = useMemo(
+    () => poolPriceFromQuotePerBase(userStartingPrice, baseIsCurrency0),
+    [userStartingPrice, baseIsCurrency0]
+  );
+  const rawPoolPrice = useMemo(() => {
+    if (dec0 === undefined || dec1 === undefined) return humanPoolPrice;
+    return humanPoolPriceToRaw(humanPoolPrice, dec0, dec1);
+  }, [humanPoolPrice, dec0, dec1]);
+  const previewCurBin = useMemo(
+    () => binAtTick(Math.round(Math.log(rawPoolPrice) / Math.log(1.0001)), previewBinSize),
+    [rawPoolPrice, previewBinSize]
+  );
+  const rampPreview = useMemo(
+    () => buildRampPreview(previewBinSize, DEFAULT_RAMP, DEFAULT_BINS_PER_SIDE, previewCurBin),
+    [previewBinSize, previewCurBin]
+  );
   const rampPreviewMaxL = useMemo(
     () => rampPreview.reduce((m, b) => (b.liquidity > m ? b.liquidity : m), 0n),
     [rampPreview]
   );
-  const previewPrice = Number(startingPrice) > 0 ? Number(startingPrice) : 1;
   const previewAxisBook = useMemo(
     () => ({
       binSize: previewBinSize,
-      currentBin: 0,
-      minBin: -DEFAULT_BINS_PER_SIDE,
-      maxBin: DEFAULT_BINS_PER_SIDE - 1,
-      sqrtPriceX96: priceToSqrtPriceX96(previewPrice),
+      currentBin: previewCurBin,
+      minBin: previewCurBin - DEFAULT_BINS_PER_SIDE,
+      maxBin: previewCurBin + DEFAULT_BINS_PER_SIDE - 1,
+      sqrtPriceX96: priceToSqrtPriceX96(rawPoolPrice),
       configured: false,
+      seeded: false,
     }),
-    [previewBinSize, previewPrice]
+    [previewBinSize, rawPoolPrice, previewCurBin]
   );
 
-  const series = showDemo ? rampPreview : liveSeries;
-  const maxL = showDemo ? rampPreviewMaxL : liveMaxL;
-  const axisBook = showDemo ? previewAxisBook : book;
+  const emptyRampPreview = useMemo(
+    () =>
+      book ? buildRampPreview(book.binSize, book.ramp, book.numBinsPerSide, book.currentBin) : [],
+    [book]
+  );
+  const emptyRampMaxL = useMemo(
+    () => emptyRampPreview.reduce((m, b) => (b.liquidity > m ? b.liquidity : m), 0n),
+    [emptyRampPreview]
+  );
+  const showEmptyRamp = needsSeed && !showDemoRamp && liveMaxL === 0n;
 
-  const bookPrice = book && book.sqrtPriceX96 > 0n ? sqrtPriceX96ToPrice(book.sqrtPriceX96) : null;
+  const series = showDemoRamp ? rampPreview : showEmptyRamp ? emptyRampPreview : liveSeries;
+  const maxL = showDemoRamp ? rampPreviewMaxL : showEmptyRamp ? emptyRampMaxL : liveMaxL;
+  const axisBook = showDemoRamp ? previewAxisBook : book;
 
-  // Range composition (which side(s) of the deposit this range actually needs) — mirrors the
-  // contract's per-bin token0/token1 split so typing one amount can correctly derive the other,
-  // and so a range entirely above/below spot locks out the token it doesn't need.
-  const baseRamp = showDemo ? DEFAULT_RAMP : (book?.ramp ?? DEFAULT_RAMP);
-  const numBinsPerSide = showDemo
+  const bookPoolPriceRaw =
+    book && book.sqrtPriceX96 > 0n ? sqrtPriceX96ToPrice(book.sqrtPriceX96) : null;
+  const displayPoolPrice = useMemo(() => {
+    const raw = needsCreate ? rawPoolPrice : (bookPoolPriceRaw ?? rawPoolPrice);
+    if (dec0 === undefined || dec1 === undefined) {
+      return baseIsCurrency0 ? raw : 1 / raw;
+    }
+    return rawPoolPriceToQuotePerBase(raw, baseIsCurrency0, dec0, dec1);
+  }, [needsCreate, rawPoolPrice, bookPoolPriceRaw, baseIsCurrency0, dec0, dec1]);
+
+  // Range composition uses on-chain orientation (currency1 / currency0) in wei-ratio space.
+  const compositionPrice = showDemoRamp ? rawPoolPrice : (bookPoolPriceRaw ?? rawPoolPrice);
+  const baseRamp = showDemoRamp ? DEFAULT_RAMP : (book?.ramp ?? DEFAULT_RAMP);
+  const numBinsPerSide = showDemoRamp
     ? DEFAULT_BINS_PER_SIDE
     : (book?.numBinsPerSide ?? DEFAULT_BINS_PER_SIDE);
-  // The demo ramp's own axisBook always centers on bin 0 (a fixed, price-independent visual), but
-  // the actual deposit composition must be centered on whichever bin the entered starting price
-  // falls into — otherwise a price far from 1 makes the checked range miss the real price entirely,
-  // and every bin looks single-sided (composeRangeAmounts sees `sqrtCur` outside every bin it's
-  // given), locking one of the two deposit fields even though the pool would genuinely take both.
-  const previewCurBin = useMemo(
-    () => binAtTick(Math.round(Math.log(previewPrice) / Math.log(1.0001)), previewBinSize),
-    [previewPrice, previewBinSize]
-  );
   const curBin = needsCreate ? previewCurBin : (axisBook?.currentBin ?? 0);
   const effLower = lowerBin ?? curBin - numBinsPerSide;
   const effUpper = upperBin ?? curBin + numBinsPerSide - 1;
   const effBinSize = axisBook?.binSize ?? previewBinSize;
-  const compositionPrice = showDemo ? previewPrice : (bookPrice ?? 1);
 
   const composition = useMemo(
     () => composeRangeAmounts(effLower, effUpper, curBin, effBinSize, baseRamp, compositionPrice),
@@ -296,11 +333,10 @@ export function LiquidityConsole() {
 
   const depositRatioQuotePerBase = useMemo(() => {
     if (composition.mode !== "straddle" || composition.need0 <= 0) return null;
-    const baseNeed = baseIsCurrency0 ? composition.need0 : composition.need1;
-    const quoteNeed = baseIsCurrency0 ? composition.need1 : composition.need0;
-    if (baseNeed <= 0) return null;
-    return quoteNeed / baseNeed;
-  }, [composition, baseIsCurrency0]);
+    if (dec0 === undefined || dec1 === undefined) return null;
+    const rawC1PerC0 = composition.need1 / composition.need0;
+    return rawPoolPriceToQuotePerBase(rawC1PerC0, baseIsCurrency0, dec0, dec1);
+  }, [composition, baseIsCurrency0, dec0, dec1]);
 
   function linkDepositFromLeader(
     leader: "base" | "quote",
@@ -408,17 +444,18 @@ export function LiquidityConsole() {
   function applyShape(next: Shape) {
     setShape(next);
     setRangeStart(null);
-    if (!book) return;
+    const ref = needsCreate ? previewAxisBook : book;
+    if (!ref) return;
     if (next === "auto") {
       setLowerBin(null);
       setUpperBin(null);
     } else if (next === "full") {
-      setLowerBin(book.minBin);
-      setUpperBin(book.maxBin);
+      setLowerBin(ref.minBin);
+      setUpperBin(ref.maxBin);
     } else if (next === "tight" || next === "wide") {
       const half = next === "tight" ? 5 : 20;
-      setLowerBin(Math.max(book.minBin, book.currentBin - half));
-      setUpperBin(Math.min(book.maxBin, book.currentBin + half));
+      setLowerBin(Math.max(ref.minBin, ref.currentBin - half));
+      setUpperBin(Math.min(ref.maxBin, ref.currentBin + half));
     }
   }
 
@@ -435,7 +472,7 @@ export function LiquidityConsole() {
     }
   }
 
-  const { writeContractAsync } = useWriteContract();
+  const { writeContractAsync } = useContractWrite();
   const publicClient = useAppPublicClient(deployment);
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
 
@@ -451,21 +488,28 @@ export function LiquidityConsole() {
 
   const balBase = baseIsCurrency0 ? bal0 : bal1;
   const balQuote = baseIsCurrency0 ? bal1 : bal0;
-  const decBase = baseIsCurrency0 ? base.decimals : quote.decimals;
-  const decQuote = baseIsCurrency0 ? quote.decimals : base.decimals;
+  const decBase = baseIsCurrency0 ? dec0 : dec1;
+  const decQuote = baseIsCurrency0 ? dec1 : dec0;
 
   const txSummary =
     (baseAmount !== "0" || quoteAmount !== "0") && pickBase.symbol && pickQuote.symbol
       ? `${baseAmount !== "0" ? `${baseAmount} ${pickBase.symbol}` : ""}${baseAmount !== "0" && quoteAmount !== "0" ? " + " : ""}${quoteAmount !== "0" ? `${quoteAmount} ${pickQuote.symbol}` : ""}`
       : undefined;
 
-  const dec0 = base.decimals;
-  const dec1 = quote.decimals;
-
   const binsCovered = lowerBin !== null && upperBin !== null ? upperBin - lowerBin + 1 : null;
 
-  const binPriceLabel = (info: ReturnType<typeof binPriceInfo>) =>
-    `1 ${base.symbol ?? "token0"} = ${formatPriceHuman(info.arithmeticMean)} ${quote.symbol ?? "token1"}`;
+  const fmtUserPrice = (rawC1PerC0: number) => {
+    if (dec0 === undefined || dec1 === undefined) {
+      return formatPriceHuman(baseIsCurrency0 ? rawC1PerC0 : 1 / rawC1PerC0);
+    }
+    return formatPriceHuman(rawPoolPriceToQuotePerBase(rawC1PerC0, baseIsCurrency0, dec0, dec1));
+  };
+  const pricePairLabel = `${pickQuote.symbol ?? "quote"}/${pickBase.symbol ?? "base"}`;
+
+  const binPriceLabel = (info: ReturnType<typeof binPriceInfo>) => {
+    const userPrice = fmtUserPrice(info.arithmeticMean);
+    return `1 ${pickBase.symbol ?? "base"} = ${userPrice} ${pickQuote.symbol ?? "quote"}`;
+  };
 
   const hoveredBinPrice = useMemo(() => {
     if (hoveredBin === null) return null;
@@ -518,8 +562,8 @@ export function LiquidityConsole() {
     if (needsCreate) {
       allSteps.push({ label: "Create pool", done: false });
     }
-    if (needsApproval0) allSteps.push({ label: `Approve ${base.symbol}`, done: false });
-    if (needsApproval1) allSteps.push({ label: `Approve ${quote.symbol}`, done: false });
+    if (needsApproval0) allSteps.push({ label: `Approve ${currency0Meta.symbol}`, done: false });
+    if (needsApproval1) allSteps.push({ label: `Approve ${currency1Meta.symbol}`, done: false });
     allSteps.push({ label: "Add liquidity", done: false });
     setTxSteps(allSteps);
 
@@ -529,24 +573,15 @@ export function LiquidityConsole() {
       stepIdx++;
     };
 
-    // Waits for each step to actually land on-chain before moving to the next — addLiquidity
-    // depends on createPool having landed, and its transferFrom depends on the approvals having
-    // landed, so firing steps back-to-back the moment each is merely *sent* (not yet mined) risks
-    // the next step reverting against stale pre-tx state.
     const sendAndConfirm = async (params: Parameters<typeof writeContractAsync>[0]) => {
-      // Dry-runs the call against current chain state first — surfaces the real revert reason
-      // immediately, before the wallet even opens or any gas is spent, instead of only finding
-      // out after paying for a failed transaction. It also returns an accurate gas estimate,
-      // replacing the hardcoded caps so wide books don't run out of gas.
-      const sim = await publicClient.simulateContract({ ...params, account: address } as Parameters<
-        typeof publicClient.simulateContract
-      >[0]);
+      const sim = await publicClient.simulateContract({
+        ...params,
+        account: address,
+      } as Parameters<typeof publicClient.simulateContract>[0]);
       const estimatedGas = sim.request.gas;
       const gas = estimatedGas ? (estimatedGas * 12n) / 10n : params.gas;
       const hash = await writeContractAsync(gas ? { ...params, gas } : params);
       setTxHash(hash);
-      // A bounded timeout so a flaky/rate-limited RPC surfaces as an error instead of spinning
-      // forever — the transaction itself may still be fine on-chain even if this call times out.
       await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
       markDone();
     };
@@ -560,6 +595,9 @@ export function LiquidityConsole() {
           setStatus("Enter a valid starting price");
           return;
         }
+        const initSqrtPrice = priceToSqrtPriceX96(
+          quotePerBaseToRawPoolPrice(price, baseIsCurrency0, dec0, dec1)
+        );
         const bs = Number(binSize);
         if (!Number.isFinite(bs) || bs <= 0) {
           setTxModalStatus("error");
@@ -571,9 +609,10 @@ export function LiquidityConsole() {
           address: deployment.binBook,
           abi: binBookAbi,
           functionName: "createPool",
-          args: [key, priceToSqrtPriceX96(price), bs],
+          args: [key, initSqrtPrice, bs],
           gas: 500_000n,
         });
+        await refetchBook();
       }
 
       if (needsApproval0) {
@@ -595,19 +634,34 @@ export function LiquidityConsole() {
         });
       }
 
-      // effLower/effUpper already fall back to the default ramp window (curBin ± numBinsPerSide)
-      // whenever no explicit range is picked — reuse that instead of a 0/0 sentinel, which
-      // `resolveWindow` rejects outright (`tickLower >= tickUpper`) since the contract has no
-      // "auto" concept of its own; it only ever validates a real, non-degenerate tick range.
       const tickLower = tickAtBin(effLower, effBinSize);
       const tickUpper = tickAtBin(effUpper + 1, effBinSize);
 
-      // Slippage guard on the deposit: allow the pool to take slightly less of each token than
-      // desired (normal for a small price move) but revert if it would take materially less than
-      // the user asked for — otherwise a reorder could settle the deposit at any near-zero ratio.
       const pct = Math.min(Math.max(Number(slippage) || 0.5, 0), 99);
       const minScale = (amount: bigint) =>
         amount > 0n ? (amount * BigInt(Math.round((100 - pct) * 100))) / 10_000n : 0n;
+
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+      const userInputSalt = ("0x" + "00".repeat(32)) as `0x${string}`;
+      const addLiquidityArgsBase = {
+        amount0Desired: a0,
+        amount1Desired: a1,
+        amount0Min: 0n,
+        amount1Min: 0n,
+        deadline,
+        tickLower,
+        tickUpper,
+        userInputSalt,
+      };
+
+      const addLiqSim = await publicClient.simulateContract({
+        address: deployment.binBook,
+        abi: binBookAbi,
+        functionName: "addLiquidity",
+        args: [key, addLiquidityArgsBase],
+        account: address,
+      } as Parameters<typeof publicClient.simulateContract>[0]);
+      const [expected0, expected1] = unpackBalanceDelta(addLiqSim.result as bigint);
 
       const addLiquidityParams = {
         address: deployment.binBook,
@@ -616,25 +670,14 @@ export function LiquidityConsole() {
         args: [
           key,
           {
-            amount0Desired: a0,
-            amount1Desired: a1,
-            amount0Min: minScale(a0),
-            amount1Min: minScale(a1),
-            deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
-            tickLower,
-            tickUpper,
-            userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
+            ...addLiquidityArgsBase,
+            amount0Min: minScale(expected0),
+            amount1Min: minScale(expected1),
           },
         ],
         gas: 3_000_000n,
       } as const;
 
-      const addLiqSim = await publicClient.simulateContract({
-        ...addLiquidityParams,
-        account: address,
-      } as Parameters<typeof publicClient.simulateContract>[0]);
-      // Use the simulated gas estimate (+10% headroom) instead of the hardcoded cap, so wide
-      // books / many-bin deposits don't hit OutOfGas.
       const addLiqGas = addLiqSim.request.gas
         ? (addLiqSim.request.gas * 12n) / 10n
         : addLiquidityParams.gas;
@@ -646,6 +689,8 @@ export function LiquidityConsole() {
       setTxModalStatus("success");
       setStatus(needsCreate ? "Pool created and liquidity added" : "Liquidity added");
       balQ.refetch();
+      allowQ.refetch();
+      void refetchBook();
     } catch (err) {
       setTxModalStatus("error");
       const msg = err instanceof Error ? err.message.slice(0, 200) : "Failed";
@@ -677,19 +722,17 @@ export function LiquidityConsole() {
 
   return (
     <div>
-      <StatsBar />
-
       <div className="console-topbar">
         <span className="mono">
-          {base.symbol ?? "…"} / {quote.symbol ?? "…"}
+          {pickBase.symbol ?? "…"} / {pickQuote.symbol ?? "…"}
         </span>
         <span className="fee-badge mono">
           {((deployment?.poolFee ?? 3000) / 10000).toFixed(2)}% fee
         </span>
         {ready && !pairInvalid && (
-          <span className={needsCreate ? "pool-status warn" : "pool-status ok"}>
+          <span className={needsCreate ? "pool-status warn" : needsSeed ? "pool-status warn" : "pool-status ok"}>
             <span className="pool-status-dot" />
-            {needsCreate ? "Not deployed" : "Pool live"}
+            {needsCreate ? "Not deployed" : needsSeed ? "Empty pool" : "Pool live"}
           </span>
         )}
         {preview && <span className="badge">Preview</span>}
@@ -704,7 +747,9 @@ export function LiquidityConsole() {
       {!pairInvalid && needsCreate && (
         <div className="new-pool-panel">
           <div className="field">
-            <label>Starting price</label>
+            <label>
+              Starting price ({pickQuote.symbol ?? "quote"} per {pickBase.symbol ?? "base"})
+            </label>
             <input
               value={startingPrice}
               onChange={(e) => setStartingPrice(e.target.value)}
@@ -722,7 +767,7 @@ export function LiquidityConsole() {
             </select>
           </div>
           <p className="new-pool-hint">
-            Initializes the {base.symbol ?? "token0"} / {quote.symbol ?? "token1"} pool at this
+            Initializes the {pickBase.symbol ?? "base"} / {pickQuote.symbol ?? "quote"} pool at this
             price, locks the bin size, then deposits the amounts below as the first bins of the ramp
             — one confirmation flow instead of a separate create-pool page.
           </p>
@@ -730,21 +775,24 @@ export function LiquidityConsole() {
       )}
 
       <div className="console-grid">
-        <div className={showDemo ? "panel preview" : "panel"}>
+        <div className={preview ? "panel preview" : "panel"}>
           <div className="ramp-card-head">
             <div>
               <h2>Liquidity ramp</h2>
               <p>
-                {showDemo
+                {preview
                   ? "Computed from the default ramp decay for this bin size — per-bin liquidity turns real once the pool is live."
-                  : "Click a bin to start a range, click another to finish it — or pick a shape below."}
+                  : needsCreate
+                    ? "Click a bin to choose your first deposit range, or pick a shape below — centered on your starting price."
+                    : needsSeed
+                      ? "Pool created — click bins to choose where to add your first liquidity, or pick a shape below."
+                      : "Click a bin to start a range, click another to finish it — or pick a shape below."}
               </p>
             </div>
             {!preview && (
               <span className="ramp-price-chip mono">
-                1 {base.symbol ?? "token0"} ={" "}
-                {formatPriceHuman(needsCreate ? previewPrice : (bookPrice ?? 1))}{" "}
-                {quote.symbol ?? "token1"}
+                1 {pickBase.symbol ?? "base"} = {formatPriceHuman(displayPoolPrice)}{" "}
+                {pickQuote.symbol ?? "quote"}
               </span>
             )}
           </div>
@@ -763,7 +811,7 @@ export function LiquidityConsole() {
                   upperBin !== null &&
                   b.binIndex >= lowerBin &&
                   b.binIndex <= upperBin;
-                const clickable = !showDemo;
+                const clickable = rampInteractive;
                 const info = binPriceInfo(b.binIndex, effBinSize);
                 const cls = [
                   "ramp-bar",
@@ -781,7 +829,7 @@ export function LiquidityConsole() {
                     style={{ height: `${Math.max(pct, b.liquidity > 0n ? 6 : 0)}%` }}
                     title={
                       clickable
-                        ? `bin ${b.binIndex}\n${binPriceLabel(info)}\nedges ${formatPriceHuman(info.priceLower)} – ${formatPriceHuman(info.priceUpper)}`
+                        ? `bin ${b.binIndex}\n${binPriceLabel(info)}\nedges ${fmtUserPrice(info.priceLower)} – ${fmtUserPrice(info.priceUpper)}`
                         : `bin ${b.binIndex} · ${binPriceLabel(info)}`
                     }
                     onClick={clickable ? () => handleSelectBin(b.binIndex) : undefined}
@@ -794,22 +842,21 @@ export function LiquidityConsole() {
               })}
             </div>
           </div>
-          {hoveredBinPrice && !showDemo && (
+          {hoveredBinPrice && rampInteractive && (
             <p className="ramp-bin-price mono">
-              Bin <b>{hoveredBin}</b> · mean {formatPriceHuman(hoveredBinPrice.arithmeticMean)}{" "}
-              {quote.symbol ?? "token1"} / {base.symbol ?? "token0"} · edges{" "}
-              {formatPriceHuman(hoveredBinPrice.priceLower)} –{" "}
-              {formatPriceHuman(hoveredBinPrice.priceUpper)}
+              Bin <b>{hoveredBin}</b> · mean {fmtUserPrice(hoveredBinPrice.arithmeticMean)}{" "}
+              {pricePairLabel} · edges {fmtUserPrice(hoveredBinPrice.priceLower)} –{" "}
+              {fmtUserPrice(hoveredBinPrice.priceUpper)}
             </p>
           )}
           <div className="ramp-axis">
             <span>
-              lower · {formatPriceHuman((selectedRangePrice ?? defaultRangePrice).priceMin)}{" "}
-              {quote.symbol ?? "token1"}/{base.symbol ?? "token0"}
+              lower · {fmtUserPrice((selectedRangePrice ?? defaultRangePrice).priceMin)}{" "}
+              {pricePairLabel}
             </span>
             <span>
-              upper · {formatPriceHuman((selectedRangePrice ?? defaultRangePrice).priceMax)}{" "}
-              {quote.symbol ?? "token1"}/{base.symbol ?? "token0"}
+              upper · {fmtUserPrice((selectedRangePrice ?? defaultRangePrice).priceMax)}{" "}
+              {pricePairLabel}
             </span>
           </div>
 
@@ -820,9 +867,8 @@ export function LiquidityConsole() {
                 {selectedRangePrice && (
                   <>
                     {" "}
-                    · price {formatPriceHuman(selectedRangePrice.priceMin)} –{" "}
-                    {formatPriceHuman(selectedRangePrice.priceMax)} {quote.symbol ?? "token1"} per{" "}
-                    {base.symbol ?? "token0"}
+                    · price {fmtUserPrice(selectedRangePrice.priceMin)} –{" "}
+                    {fmtUserPrice(selectedRangePrice.priceMax)} {pricePairLabel}
                   </>
                 )}
               </>
@@ -830,9 +876,8 @@ export function LiquidityConsole() {
               <>
                 Default ramp window around the active bin
                 {" · price "}
-                {formatPriceHuman(defaultRangePrice.priceMin)} –{" "}
-                {formatPriceHuman(defaultRangePrice.priceMax)} {quote.symbol ?? "token1"} per{" "}
-                {base.symbol ?? "token0"}
+                {fmtUserPrice(defaultRangePrice.priceMin)} –{" "}
+                {fmtUserPrice(defaultRangePrice.priceMax)} {pricePairLabel}
               </>
             )}
             {" · per-bin mean = average of that bin's lower and upper edge prices (1.0001^tick)."}
@@ -844,7 +889,7 @@ export function LiquidityConsole() {
               type="button"
               className={shape === "auto" ? "shape-pill active" : "shape-pill"}
               onClick={() => applyShape("auto")}
-              disabled={showDemo}
+              disabled={!rampInteractive}
             >
               Auto
             </button>
@@ -852,7 +897,7 @@ export function LiquidityConsole() {
               type="button"
               className={shape === "tight" ? "shape-pill active" : "shape-pill"}
               onClick={() => applyShape("tight")}
-              disabled={showDemo}
+              disabled={!rampInteractive}
             >
               Tight · ±5
             </button>
@@ -860,7 +905,7 @@ export function LiquidityConsole() {
               type="button"
               className={shape === "wide" ? "shape-pill active" : "shape-pill"}
               onClick={() => applyShape("wide")}
-              disabled={showDemo}
+              disabled={!rampInteractive}
             >
               Wide · ±20
             </button>
@@ -868,7 +913,7 @@ export function LiquidityConsole() {
               type="button"
               className={shape === "full" ? "shape-pill active" : "shape-pill"}
               onClick={() => applyShape("full")}
-              disabled={showDemo}
+              disabled={!rampInteractive}
             >
               Full book
             </button>
@@ -880,10 +925,9 @@ export function LiquidityConsole() {
               Custom
             </button>
           </div>
-          {showDemo && (
+          {preview && (
             <p className="ramp-caption">
-              Range picker unlocks once the pool is live — the first deposit uses the default ramp
-              window.
+              Connect a wallet to interact with the ramp — preview shows the default shape only.
             </p>
           )}
 
@@ -894,13 +938,20 @@ export function LiquidityConsole() {
             </div>
             <div className="meta-chip">
               <dt>Bin size</dt>
-              <dd>{showDemo ? binSize : (book?.binSize ?? "—")}</dd>
+              <dd>{showDemoRamp ? binSize : (book?.binSize ?? "—")}</dd>
             </div>
             <div className="meta-chip">
               <dt>Active bin</dt>
-              <dd>{showDemo ? "—" : (book?.currentBin ?? "—")}</dd>
+              <dd>{axisBook?.currentBin ?? "—"}</dd>
             </div>
           </div>
+
+          {needsSeed && !needsCreate && (
+            <p className="ramp-caption">
+              No liquidity on-chain yet — the ramp preview is centered on the pool&apos;s starting
+              price so you can pick a range for your first deposit.
+            </p>
+          )}
         </div>
 
         <form className={preview ? "deposit-dock preview" : "deposit-dock"} onSubmit={onSubmit}>

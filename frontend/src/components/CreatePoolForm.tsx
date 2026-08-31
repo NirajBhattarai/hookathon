@@ -2,11 +2,14 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import { parseUnits, type Address } from "viem";
-import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract } from "wagmi";
+import { useAccount, useWaitForTransactionReceipt, useReadContract } from "wagmi";
+import { useContractWrite } from "@/hooks/useContractWrite";
 import { binBookAbi } from "@/lib/abi/binBook";
+import { useAppPublicClient } from "@/hooks/useAppPublicClient";
 import { useDeployment } from "@/hooks/useDeployment";
 import { NetworkGate } from "@/components/NetworkGate";
-import { priceToSqrtPriceX96 } from "@/lib/priceMath";
+import { priceToSqrtPriceX96, quotePerBaseToRawPoolPrice } from "@/lib/priceMath";
+import { unpackBalanceDelta } from "@/lib/balanceDelta";
 import { binAtTick, tickAtBin, DEFAULT_BINS_PER_SIDE } from "@/lib/bins";
 
 const erc20Abi = [
@@ -39,6 +42,7 @@ const erc20Abi = [
 export function CreatePoolForm() {
   const { address, isConnected } = useAccount();
   const { deployment, ready, needsNetworkSwitch } = useDeployment();
+  const publicClient = useAppPublicClient(deployment);
   const [startingPrice, setStartingPrice] = useState("1");
   const [binSize, setBinSize] = useState("60");
   const [seed0, setSeed0] = useState("1000");
@@ -47,7 +51,7 @@ export function CreatePoolForm() {
   const [slippage, setSlippage] = useState("0.50");
   const [status, setStatus] = useState<string | null>(null);
 
-  const { writeContractAsync, data: hash, isPending } = useWriteContract();
+  const { writeContractAsync, data: hash, isPending } = useContractWrite();
   const { isLoading: confirming } = useWaitForTransactionReceipt({ hash });
 
   const { data: symbol0 } = useReadContract({
@@ -77,8 +81,8 @@ export function CreatePoolForm() {
 
   const label0 = symbol0 ?? "TOKEN0";
   const label1 = symbol1 ?? "TOKEN1";
-  const dec0 = decimals0 ?? 18;
-  const dec1 = decimals1 ?? 18;
+  const dec0 = Number(decimals0 ?? 18);
+  const dec1 = Number(decimals1 ?? 18);
 
   const poolKey = useMemo(() => {
     if (!deployment) return null;
@@ -95,21 +99,30 @@ export function CreatePoolForm() {
     };
   }, [deployment]);
 
+  const deploymentToken0IsCurrency0 = useMemo(
+    () =>
+      poolKey
+        ? deployment!.token0.toLowerCase() === poolKey.currency0.toLowerCase()
+        : true,
+    [poolKey, deployment]
+  );
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!isConnected) {
       setStatus("Connect your wallet first");
       return;
     }
-    if (needsNetworkSwitch || !ready || !deployment || !address || !poolKey) {
+    if (needsNetworkSwitch || !ready || !deployment || !address || !poolKey || !publicClient) {
       setStatus("Switch to a configured network first");
       return;
     }
-    const price = Number(startingPrice);
-    if (!Number.isFinite(price) || price <= 0) {
-      setStatus("Enter a valid starting price (token1 per token0)");
+    const userPrice = Number(startingPrice);
+    if (!Number.isFinite(userPrice) || userPrice <= 0) {
+      setStatus(`Enter a valid starting price (${label1} per ${label0})`);
       return;
     }
+    const poolPrice = quotePerBaseToRawPoolPrice(userPrice, deploymentToken0IsCurrency0, dec0, dec1);
     const bs = Number(binSize);
     if (!Number.isFinite(bs) || bs <= 0) {
       setStatus("Enter a valid bin size");
@@ -118,10 +131,8 @@ export function CreatePoolForm() {
 
     setStatus(null);
     try {
-      const sqrtPriceX96 = priceToSqrtPriceX96(price);
+      const sqrtPriceX96 = priceToSqrtPriceX96(poolPrice);
 
-      // 1) Atomically initialize the v4 pool and lock in its bin size. createPool is the only
-      // valid entry point — calling PoolManager.initialize directly reverts (InitializeViaCreatePool).
       await writeContractAsync({
         address: deployment.binBook,
         abi: binBookAbi,
@@ -129,11 +140,9 @@ export function CreatePoolForm() {
         args: [poolKey, sqrtPriceX96, bs],
       });
 
-      // 2) Optional seed liquidity
       if (withSeed) {
         const a0 = parseUnits(seed0 || "0", dec0);
         const a1 = parseUnits(seed1 || "0", dec1);
-        // Map amounts to sorted currency0/currency1
         const token0IsCurrency0 =
           deployment.token0.toLowerCase() === poolKey.currency0.toLowerCase();
         const amount0 = token0IsCurrency0 ? a0 : a1;
@@ -156,16 +165,30 @@ export function CreatePoolForm() {
           });
         }
         if (amount0 > 0n || amount1 > 0n) {
-          // Contract rejects tickLower >= tickUpper (no 0/0 "auto" sentinel). Mirror
-          // LiquidityConsole / createPool defaults: curBin ± DEFAULT_BINS_PER_SIDE.
-          const curBin = binAtTick(Math.round(Math.log(price) / Math.log(1.0001)), bs);
+          const curBin = binAtTick(Math.round(Math.log(poolPrice) / Math.log(1.0001)), bs);
           const tickLower = tickAtBin(curBin - DEFAULT_BINS_PER_SIDE, bs);
           const tickUpper = tickAtBin(curBin + DEFAULT_BINS_PER_SIDE, bs);
-
-          // Slippage guard: allow the pool to take slightly less than the seeded amount of each
-          // token, but not materially less.
           const pct = Math.min(Math.max(Number(slippage) || 0.5, 0), 99);
-          const scale = (v: bigint) => (v * BigInt(Math.round((100 - pct) * 100))) / 10_000n;
+          const minScale = (v: bigint) =>
+            v > 0n ? (v * BigInt(Math.round((100 - pct) * 100))) / 10_000n : 0n;
+          const addArgsBase = {
+            amount0Desired: amount0,
+            amount1Desired: amount1,
+            amount0Min: 0n,
+            amount1Min: 0n,
+            deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
+            tickLower,
+            tickUpper,
+            userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
+          };
+          const sim = await publicClient.simulateContract({
+            address: deployment.binBook,
+            abi: binBookAbi,
+            functionName: "addLiquidity",
+            args: [poolKey, addArgsBase],
+            account: address,
+          } as Parameters<typeof publicClient.simulateContract>[0]);
+          const [expected0, expected1] = unpackBalanceDelta(sim.result as bigint);
 
           await writeContractAsync({
             address: deployment.binBook,
@@ -174,14 +197,9 @@ export function CreatePoolForm() {
             args: [
               poolKey,
               {
-                amount0Desired: amount0,
-                amount1Desired: amount1,
-                amount0Min: scale(amount0),
-                amount1Min: scale(amount1),
-                deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
-                tickLower,
-                tickUpper,
-                userInputSalt: ("0x" + "00".repeat(32)) as `0x${string}`,
+                ...addArgsBase,
+                amount0Min: minScale(expected0),
+                amount1Min: minScale(expected1),
               },
             ],
           });
@@ -244,7 +262,8 @@ export function CreatePoolForm() {
                   </span>
                 </div>
                 <p className="field-hint">
-                  Uniswap price = currency1 / currency0 (after address sort)
+                  Enter {label1} per {label0} — converted to on-chain currency1/currency0 before
+                  deploying.
                 </p>
               </div>
 

@@ -32,10 +32,10 @@ export type Position = {
  * BinBook has ever created — resolved with a single multicall per pool (shares, supply, pending
  * fees, live book state), no backend involved.
  */
-export function usePositions() {
+export function usePositions(scanAllPools = true) {
   const { address } = useAccount();
   const { deployment, ready } = useDeployment();
-  const { pools, isLoading: poolsLoading } = usePools();
+  const { pools, isLoading: poolsLoading } = usePools(scanAllPools && !!address);
 
   const contracts = useMemo(() => {
     if (!ready || !deployment || !address) return [];
@@ -73,7 +73,13 @@ export function usePositions() {
 
   const q = useReadContracts({
     contracts,
-    query: { enabled: contracts.length > 0, refetchInterval: 20_000 },
+    query: {
+      enabled: contracts.length > 0,
+      staleTime: 30_000,
+      refetchInterval: scanAllPools ? 30_000 : false,
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: false,
+    },
   });
 
   const positions = useMemo((): Position[] => {

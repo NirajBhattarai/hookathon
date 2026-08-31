@@ -2,137 +2,23 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { encodeAbiParameters, formatUnits, keccak256, parseUnits, type Address } from "viem";
+import { useQuery } from "@tanstack/react-query";
 import {
   useAccount,
-  useReadContract,
   useReadContracts,
   useWaitForTransactionReceipt,
-  useWriteContract,
 } from "wagmi";
+import { useContractWrite } from "@/hooks/useContractWrite";
 import { useDeployment } from "@/hooks/useDeployment";
 import { useAppPublicClient } from "@/hooks/useAppPublicClient";
 import { sameAddress, useTradePair } from "@/context/TradePairContext";
-import { asInt128 } from "@/lib/balanceDelta";
 import { AllowancePrompt } from "@/components/AllowancePrompt";
 import { AllowancesModal } from "@/components/AllowancesModal";
 import { TokenSelect } from "@/components/TokenSelect";
 import { TxModal, type TxStatus, type TxStep } from "@/components/TxModal";
 import { formatPriceHuman } from "@/lib/priceMath";
+import { fetchSwapQuote, swapRouterAbi, SwapQuoteError } from "@/lib/swapQuote";
 import { findToken, tokenByAddress } from "@/lib/tokens";
-
-/**
- * BinQuoter performs the real pool swap inside PoolManager.unlock() and reverts
- * with Quote(amount0, amount1). eth_call discards the state changes, so the
- * revert payload is the quote. Works without any token approvals.
- */
-const binQuoterAbi = [
-  {
-    type: "error",
-    name: "Quote",
-    inputs: [
-      { name: "amount0", type: "int128" },
-      { name: "amount1", type: "int128" },
-    ],
-  },
-  {
-    type: "function",
-    name: "quoteExactInput",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "p",
-        type: "tuple",
-        components: [
-          {
-            name: "key",
-            type: "tuple",
-            components: [
-              { name: "currency0", type: "address" },
-              { name: "currency1", type: "address" },
-              { name: "fee", type: "uint24" },
-              { name: "tickSpacing", type: "int24" },
-              { name: "hooks", type: "address" },
-            ],
-          },
-          { name: "zeroForOne", type: "bool" },
-          { name: "amountIn", type: "uint256" },
-          { name: "receiver", type: "address" },
-        ],
-      },
-    ],
-    outputs: [],
-  },
-] as const;
-
-/** Decode Quote(int128,int128) out of a reverted eth_call. viem puts parsed args on a nested
- *  cause's `.data`; fall back to scanning raw revert hex anywhere on the error chain. Both paths
- *  are normalized to proper signed int128 values before returning, so the consumer never has to
- *  guess at the encoding. */
-function parseQuoteDelta(err: unknown): readonly [bigint, bigint] | null {
-  let c: unknown = err;
-  for (let depth = 0; c && depth < 8; depth++) {
-    const e = c as {
-      data?: unknown;
-      message?: string;
-      raw?: unknown;
-      cause?: unknown;
-    };
-    const d = e.data;
-    if (d) {
-      const args = (d as { args?: readonly [bigint, bigint] }).args;
-      if (args && args.length === 2) return [asInt128(BigInt(args[0])), asInt128(BigInt(args[1]))];
-      const hex =
-        typeof d === "string"
-          ? d
-          : typeof (d as { data?: string }).data === "string"
-            ? (d as { data: string }).data
-            : "";
-      const m = /0xd391f9d4([0-9a-fA-F]{128})/.exec(hex);
-      if (m) return [asInt128(BigInt(`0x${m[1].slice(0, 32)}`)), asInt128(BigInt(`0x${m[1].slice(32)}`))];
-    }
-    const m = /0xd391f9d4([0-9a-fA-F]{128})/.exec(`${e.raw ?? ""} ${e.message ?? ""}`);
-    if (m) return [asInt128(BigInt(`0x${m[1].slice(0, 32)}`)), asInt128(BigInt(`0x${m[1].slice(32)}`))];
-    c = e.cause;
-  }
-  return null;
-}
-
-const swapRouterAbi = [
-  {
-    type: "function",
-    name: "swapExactTokensForTokens",
-    stateMutability: "payable",
-    inputs: [
-      { name: "amountIn", type: "uint256" },
-      { name: "amountOutMin", type: "uint256" },
-      { name: "zeroForOne", type: "bool" },
-      {
-        name: "poolKey",
-        type: "tuple",
-        components: [
-          { name: "currency0", type: "address" },
-          { name: "currency1", type: "address" },
-          { name: "fee", type: "uint24" },
-          { name: "tickSpacing", type: "int24" },
-          { name: "hooks", type: "address" },
-        ],
-      },
-      { name: "hookData", type: "bytes" },
-      { name: "receiver", type: "address" },
-      { name: "deadline", type: "uint256" },
-    ],
-    outputs: [
-      {
-        name: "delta",
-        type: "tuple",
-        components: [
-          { name: "amount0", type: "int128" },
-          { name: "amount1", type: "int128" },
-        ],
-      },
-    ],
-  },
-] as const;
 
 const erc20MetaAbi = [
   {
@@ -179,7 +65,7 @@ const erc20MetaAbi = [
 ] as const;
 
 export function SwapForm() {
-  const { address, isConnected } = useAccount();
+  const { address } = useAccount();
   const { deployment } = useDeployment();
   const { setTradePair } = useTradePair();
 
@@ -267,6 +153,9 @@ export function SwapForm() {
   }, [deployment, c0, c1, discoveredTickSpacing]);
   const zeroForOne = !!key && sameAddress(inAddr, key.currency0);
 
+  // pair picked but no on-chain pool found at any candidate tickSpacing
+  const noPool = !!c0 && !!c1 && !!deployment && discoverQ.isSuccess && !discoveredTickSpacing;
+
   useEffect(() => {
     if (!c0 || !c1) {
       setTradePair(null, true);
@@ -310,7 +199,10 @@ export function SwapForm() {
   });
   const slotOf = (a: Address) => (sameAddress(a, c0) ? 0 : 2);
   const symOf = (a: Address) => metaQ.data?.[slotOf(a)]?.result as string | undefined;
-  const decOf = (a: Address) => metaQ.data?.[slotOf(a) + 1]?.result as number | undefined;
+  const decOf = (a: Address) => {
+    const raw = metaQ.data?.[slotOf(a) + 1]?.result;
+    return raw == null ? undefined : Number(raw);
+  };
   const balOf = (a: Address) =>
     address ? (metaQ.data?.[sameAddress(a, c0) ? 4 : 5]?.result as bigint | undefined) : undefined;
 
@@ -320,6 +212,7 @@ export function SwapForm() {
   const recvDecimals = decOf(recvToken) ?? tokenByAddress(recvToken)?.decimals;
   const payBalance = balOf(payToken);
   const recvBalance = balOf(recvToken);
+  const publicClient = useAppPublicClient(deployment);
 
   const amountInRaw = useMemo(() => {
     try {
@@ -331,44 +224,57 @@ export function SwapForm() {
     }
   }, [amountIn, payDecimals]);
 
-  // real quote: run the swap through BinQuoter inside eth_call (no approvals needed).
-  // The quoter always reverts with Quote(amount0, amount1) — that payload IS the quote.
-  const quoteArgs = useMemo(
-    () =>
-      key && address
-        ? ([{ key, zeroForOne, amountIn: amountInRaw, receiver: address }] as const)
-        : undefined,
-    [key, address, zeroForOne, amountInRaw]
-  );
-  const quoteQ = useReadContract({
-    address: deployment?.quoter,
-    abi: binQuoterAbi,
-    functionName: "quoteExactInput",
-    args: quoteArgs,
-    query: {
-      enabled: !!deployment?.quoter && !!key && !!address && amountInRaw > 0n,
-      refetchInterval: 15_000,
-      retry: false,
-    },
+  const quoteEnabled =
+    !!publicClient &&
+    !!deployment?.swapRouter &&
+    !!key &&
+    !!address &&
+    !!payToken &&
+    amountInRaw > 0n &&
+    !noPool;
+
+  const quoteQ = useQuery({
+    queryKey: [
+      "swap-quote",
+      deployment?.chainId,
+      deployment?.swapRouter,
+      deployment?.quoter,
+      deployment?.binBook,
+      key?.currency0,
+      key?.currency1,
+      key?.tickSpacing,
+      zeroForOne,
+      amountInRaw.toString(),
+      address,
+    ],
+    enabled: quoteEnabled,
+    staleTime: 10_000,
+    refetchInterval: quoteEnabled ? 15_000 : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+    queryFn: () =>
+      fetchSwapQuote({
+        publicClient: publicClient!,
+        router: deployment!.swapRouter,
+        quoter: deployment!.quoter,
+        payToken: payToken!,
+        receiver: address!,
+        poolKey: key!,
+        zeroForOne,
+        amountIn: amountInRaw,
+        preferSimulation: true,
+      }),
   });
 
   const quoteErrorText = useMemo(() => {
     const e = quoteQ.error;
     if (!e) return null;
-    if (parseQuoteDelta(e)) return null;
-    const s = `${(e as { name?: string }).name ?? ""} ${e.message}`;
-    if (/InsufficientLiquidity|PoolNotConfigured|PoolNotInitialized|CurrencyNotSettled/i.test(s))
-      return "NO_LIQUIDITY";
-    if (/0x90bfb865|WrappedError/i.test(s)) return "TOO_LARGE";
-    return "QUOTE_FAILED";
+    if (e instanceof SwapQuoteError) return e.code;
+    return "QUOTE_FAILED" as const;
   }, [quoteQ.error]);
 
-  const estimatedOutRaw = useMemo(() => {
-    const deltas = parseQuoteDelta(quoteQ.error);
-    if (!deltas) return 0n;
-    const out = asInt128(zeroForOne ? deltas[1] : deltas[0]);
-    return out > 0n ? out : 0n;
-  }, [quoteQ.error, zeroForOne]);
+  const estimatedOutRaw = quoteQ.data ?? 0n;
 
   const minOutRaw = useMemo(() => {
     if (estimatedOutRaw === 0n) return 0n;
@@ -391,8 +297,7 @@ export function SwapForm() {
   });
   const erc20ToRouter = (allowQ.data?.[0]?.result as bigint | undefined) ?? 0n;
 
-  const { writeContractAsync, isPending } = useWriteContract();
-  const publicClient = useAppPublicClient(deployment);
+  const { writeContractAsync, isPending } = useContractWrite();
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
   const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({
     hash: txHash ?? undefined,
@@ -433,11 +338,7 @@ export function SwapForm() {
     setOutAddr(a);
   }
 
-  // pair picked but no on-chain pool found at any candidate tickSpacing
-  const noPool = !!c0 && !!c1 && !!deployment && discoverQ.isSuccess && !discoveredTickSpacing;
-
   const ctaLabel = useMemo(() => {
-    if (!isConnected) return "Connect wallet";
     if (isPending || confirming) return "Confirm in wallet…";
     if (sameAddress(inAddr, outAddr)) return "Pick two different tokens";
     if (!amountIn || Number(amountIn) <= 0) return "Enter an amount";
@@ -445,7 +346,7 @@ export function SwapForm() {
     if (quoteErrorText === "NO_LIQUIDITY") return "No liquidity";
     if (quoteErrorText === "TOO_LARGE") return "Amount too large for pool";
     return "Swap";
-  }, [isConnected, isPending, confirming, amountIn, inAddr, outAddr, quoteErrorText, noPool]);
+  }, [isPending, confirming, amountIn, inAddr, outAddr, quoteErrorText, noPool]);
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -540,13 +441,14 @@ export function SwapForm() {
   }
 
   const fmtOut = useMemo(() => {
+    if (quoteQ.isFetching && amountInRaw > 0n && !noPool) return "…";
     if (!estimatedOutRaw || recvDecimals === undefined) return "—";
     const v = Number(formatUnits(estimatedOutRaw, recvDecimals));
     if (v === 0) return "0";
     // adaptive precision so dust-scale outputs (parity-priced pools) stay visible
     const dp = v >= 1 ? 4 : v >= 0.0001 ? 8 : 12;
     return v.toFixed(dp).replace(/\.?0+$/, "");
-  }, [estimatedOutRaw, recvDecimals]);
+  }, [estimatedOutRaw, recvDecimals, quoteQ.isFetching, amountInRaw, noPool]);
 
   const txSummary =
     amountIn && paySymbol && recvSymbol && fmtOut !== "—"

@@ -1,5 +1,5 @@
 import { type Address } from "viem";
-import { tickToPrice } from "./priceMath";
+import { sqrtPriceX96ToPrice, tickToPrice } from "./priceMath";
 
 /** Tick of the lower edge of a bin index. */
 export function tickAtBin(binIndex: number, binSize: number): number {
@@ -77,6 +77,32 @@ export function shortenAddress(addr: Address | string, size = 4): string {
 export const DEFAULT_RAMP = 10;
 export const DEFAULT_BINS_PER_SIDE = 10;
 
+/**
+ * Mirrors BinLayout.bookRange for an unseeded pool: storage still has min/max/current at 0
+ * until the first deposit lands, but addLiquidity resolves the active bin from sqrtPriceX96.
+ */
+export function resolveUnseededBookAxis(
+  sqrtPriceX96: bigint,
+  binSize: number,
+  numBinsPerSide: number
+): { currentBin: number; minBin: number; maxBin: number } {
+  const price = sqrtPriceX96ToPrice(sqrtPriceX96);
+  if (!(price > 0)) {
+    return {
+      currentBin: 0,
+      minBin: -numBinsPerSide,
+      maxBin: numBinsPerSide - 1,
+    };
+  }
+  const tick = Math.round(Math.log(price) / Math.log(1.0001));
+  const cur = binAtTick(tick, binSize);
+  return {
+    currentBin: cur,
+    minBin: cur - numBinsPerSide,
+    maxBin: cur + numBinsPerSide - 1,
+  };
+}
+
 /** Mirrors BinBook._distance: bins below current are 1-indexed away, current-and-above too. */
 export function rampDistance(binIndex: number, cur: number): number {
   return binIndex < cur ? cur - binIndex : binIndex - cur + 1;
@@ -102,14 +128,15 @@ export function rampForRange(lowerBin: number, upperBin: number, cur: number, ba
 export function buildRampPreview(
   binSize: number,
   ramp: number = DEFAULT_RAMP,
-  binsPerSide: number = DEFAULT_BINS_PER_SIDE
+  binsPerSide: number = DEFAULT_BINS_PER_SIDE,
+  /** Active bin for the preview — defaults to 0 (1:1 price). Pass the bin at the starting price when creating a pool. */
+  curBin: number = 0
 ): BinDepth[] {
-  const cur = 0;
-  const minBin = cur - binsPerSide;
-  const maxBin = cur + binsPerSide - 1;
+  const minBin = curBin - binsPerSide;
+  const maxBin = curBin + binsPerSide - 1;
   const map = new Map<number, bigint>();
   for (let i = minBin; i <= maxBin; i++) {
-    map.set(i, BigInt(Math.round(lForDistance(1_000_000, ramp, rampDistance(i, cur)))));
+    map.set(i, BigInt(Math.round(lForDistance(1_000_000, ramp, rampDistance(i, curBin)))));
   }
   return buildDepthSeries(minBin, maxBin, binSize, map);
 }

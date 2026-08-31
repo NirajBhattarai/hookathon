@@ -58,19 +58,21 @@ async function blockWindowFor(
   }
 }
 
-export function useSwapActivity(timeframe: Timeframe) {
+export function useSwapActivity(timeframe: Timeframe, options?: { enabled?: boolean }) {
   const { deployment, ready } = useDeployment();
   const { poolId } = usePool();
   const client = useAppPublicClient(deployment);
 
-  const enabled = ready && !!deployment && !!poolId && !!client;
+  const enabled =
+    ready && !!deployment && !!poolId && !!client && (options?.enabled ?? true);
 
   const query = useQuery({
     queryKey: ["swap-activity", deployment?.chainId, deployment?.poolManager, poolId, timeframe],
     enabled,
     staleTime: 60_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 60_000,
+    refetchInterval: enabled ? 60_000 : false,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     queryFn: async (): Promise<SwapEvent[]> => {
       const c = client!;

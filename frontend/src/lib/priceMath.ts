@@ -18,6 +18,58 @@ export function tickToPrice(tick: number): number {
   return 1.0001 ** tick;
 }
 
+/**
+ * On-chain pool price is always currency1 / currency0. The liquidity UI lets users pick an
+ * arbitrary base/quote pair, so convert their "quote per base" input into pool price space.
+ */
+export function poolPriceFromQuotePerBase(quotePerBase: number, baseIsCurrency0: boolean): number {
+  if (!Number.isFinite(quotePerBase) || quotePerBase <= 0) return 1;
+  return baseIsCurrency0 ? quotePerBase : 1 / quotePerBase;
+}
+
+/** Inverse of `poolPriceFromQuotePerBase` — show an on-chain c1/c0 price in pick-quote terms. */
+export function displayQuotePerBase(poolPrice: number, baseIsCurrency0: boolean): number {
+  if (!Number.isFinite(poolPrice) || poolPrice <= 0) return 1;
+  return baseIsCurrency0 ? poolPrice : 1 / poolPrice;
+}
+
+/**
+ * Uniswap pool price is token1_wei / token0_wei. Convert human currency1 per currency0
+ * (e.g. 100 PEPE per 1 USDC) to that raw on-chain ratio.
+ */
+export function humanPoolPriceToRaw(humanC1PerC0: number, dec0: number, dec1: number): number {
+  if (!Number.isFinite(humanC1PerC0) || humanC1PerC0 <= 0) return 1;
+  return humanC1PerC0 * 10 ** (dec1 - dec0);
+}
+
+/** Raw on-chain currency1/currency0 → human currency1 per currency0. */
+export function rawPoolPriceToHuman(rawC1PerC0: number, dec0: number, dec1: number): number {
+  if (!Number.isFinite(rawC1PerC0) || rawC1PerC0 <= 0) return 1;
+  return rawC1PerC0 / 10 ** (dec1 - dec0);
+}
+
+/** User pick quote-per-base → raw on-chain currency1/currency0 (wei ratio). */
+export function quotePerBaseToRawPoolPrice(
+  quotePerBase: number,
+  baseIsCurrency0: boolean,
+  dec0: number,
+  dec1: number
+): number {
+  const humanC1PerC0 = poolPriceFromQuotePerBase(quotePerBase, baseIsCurrency0);
+  return humanPoolPriceToRaw(humanC1PerC0, dec0, dec1);
+}
+
+/** Raw on-chain price → user-facing quote per pick-base. */
+export function rawPoolPriceToQuotePerBase(
+  rawC1PerC0: number,
+  baseIsCurrency0: boolean,
+  dec0: number,
+  dec1: number
+): number {
+  const humanC1PerC0 = rawPoolPriceToHuman(rawC1PerC0, dec0, dec1);
+  return displayQuotePerBase(humanC1PerC0, baseIsCurrency0);
+}
+
 const SUBSCRIPT_DIGITS = ["₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"];
 
 function toSubscript(n: number): string {

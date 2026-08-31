@@ -40,15 +40,16 @@ export function useTokenMeta(address?: Address) {
   });
 
   return useMemo(() => {
+    const coerce = (v: unknown) => (v == null ? undefined : Number(v));
     if (known)
       return {
         symbol: known.symbol as string | undefined,
-        decimals: known.decimals as number | undefined,
+        decimals: coerce(known.decimals),
         color: known.color,
       };
     return {
       symbol: q.data?.[0]?.result as string | undefined,
-      decimals: q.data?.[1]?.result as number | undefined,
+      decimals: coerce(q.data?.[1]?.result),
       color: undefined as string | undefined,
     };
   }, [known, q.data]);

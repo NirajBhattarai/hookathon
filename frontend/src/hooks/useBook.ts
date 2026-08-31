@@ -1,7 +1,9 @@
 "use client";
 
+import { useMemo } from "react";
 import { useReadContracts } from "wagmi";
 import { binBookAbi } from "@/lib/abi/binBook";
+import { resolveUnseededBookAxis } from "@/lib/bins";
 import { DEMO_BOOK } from "@/lib/demo";
 import { useDeployment } from "./useDeployment";
 import { usePool, type PoolPairOverride } from "./usePool";
@@ -24,9 +26,13 @@ export type BookView = {
    *  from the Book struct's own `seeded` field, which only flips once the pool's first deposit
    *  has landed — a freshly created, still-empty pool is `configured` but not yet `seeded`. */
   configured: boolean;
+  /** True once the first deposit has expanded the on-chain book range. */
+  seeded: boolean;
 };
 
-function parseBookTuple(data: unknown): Omit<BookView, "configured"> | null {
+type RawBook = Omit<BookView, "configured">;
+
+function parseBookTuple(data: unknown): RawBook | null {
   if (!data) return null;
   if (Array.isArray(data)) {
     return {
@@ -37,6 +43,7 @@ function parseBookTuple(data: unknown): Omit<BookView, "configured"> | null {
       minBin: Number(data[4]),
       maxBin: Number(data[5]),
       sqrtPriceX96: BigInt(data[6] as bigint),
+      seeded: Boolean(data[7]),
     };
   }
   const o = data as Record<string, unknown>;
@@ -48,7 +55,14 @@ function parseBookTuple(data: unknown): Omit<BookView, "configured"> | null {
     minBin: Number(o.minBin),
     maxBin: Number(o.maxBin),
     sqrtPriceX96: BigInt(o.sqrtPriceX96 as bigint),
+    seeded: Boolean(o.seeded),
   };
+}
+
+function normalizeBook(raw: RawBook, configured: boolean): BookView {
+  const base: BookView = { ...raw, configured };
+  if (!configured || base.seeded) return base;
+  return { ...base, ...resolveUnseededBookAxis(base.sqrtPriceX96, base.binSize, base.numBinsPerSide) };
 }
 
 /**
@@ -77,13 +91,17 @@ export function useBook(pair?: PoolPairOverride) {
   });
 
   const bookTuple = parseBookTuple(q.data?.[0]?.result);
-  const liveBook: BookView | null =
-    poolId && bookTuple ? { ...bookTuple, configured: Boolean(q.data?.[1]?.result) } : null;
+  const configured = Boolean(q.data?.[1]?.result);
+  const liveBook = useMemo(
+    () => (poolId && bookTuple ? normalizeBook(bookTuple, configured) : null),
+    [poolId, bookTuple, configured]
+  );
   const book = preview ? DEMO_BOOK : liveBook;
 
   return {
     book,
     preview,
     isLoading: !preview && (!poolId || (q.isPending && liveBook === null)),
+    refetch: q.refetch,
   };
 }

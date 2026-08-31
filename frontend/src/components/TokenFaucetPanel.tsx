@@ -7,8 +7,8 @@ import {
   useAccount,
   useReadContracts,
   useWaitForTransactionReceipt,
-  useWriteContract,
 } from "wagmi";
+import { useContractWrite } from "@/hooks/useContractWrite";
 import { erc20Abi, tokenFaucetAbi } from "@/lib/abi/tokenFaucet";
 import { FAUCET_TOKENS, type Category } from "@/lib/tokens";
 
@@ -18,7 +18,7 @@ const FAUCET_ADDRESS =
   "0xF65e569C6a5DD2eB465fe69de653fDecc72eF019";
 
 export function TokenFaucetPanel() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, status: accountStatus } = useAccount();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("All");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -27,10 +27,10 @@ export function TokenFaucetPanel() {
   const [doneSymbol, setDoneSymbol] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const { writeContractAsync, data: hash, isPending: signing } = useWriteContract();
+  const { writeContractAsync, connector, data: hash, isPending: signing } = useContractWrite();
   const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash });
 
-  const enabled = isConnected && !!address;
+  const enabled = isConnected && !!address && !!connector && accountStatus === "connected";
   const balanceQueries = useReadContracts({
     query: { enabled },
     contracts: FAUCET_TOKENS.map((t) => ({
@@ -167,7 +167,13 @@ export function TokenFaucetPanel() {
       </div>
 
       {status && <p className="status ok">{status}</p>}
-      {!enabled && <p className="status muted">Connect your wallet to start dripping tokens.</p>}
+      {!enabled && (
+        <p className="status muted">
+          {accountStatus === "reconnecting"
+            ? "Restoring wallet connection…"
+            : "Connect your wallet to start dripping tokens."}
+        </p>
+      )}
 
       {/* grid */}
       <div className="faucet-grid">

@@ -9,7 +9,8 @@ export type ChainDeployment = {
   binBook: Address;
   poolManager: Address;
   swapRouter: Address;
-  quoter: Address;
+  /** Optional test quoter — reverts with Quote(amount0, amount1) on eth_call. */
+  quoter?: Address;
   token0: Address;
   token1: Address;
   poolFee: number;
@@ -107,7 +108,7 @@ export function deploymentFor(chainId: number): ChainDeployment {
     binBook: envAddress(env.binBook),
     poolManager: envAddress(env.poolManager),
     swapRouter: envAddress(env.swapRouter),
-    quoter: envAddress(env.quoter),
+    quoter: env.quoter && env.quoter.length > 0 ? envAddress(env.quoter) : undefined,
     token0: envAddress(env.token0),
     token1: envAddress(env.token1),
     poolFee: envInt(env.poolFee, 3000),

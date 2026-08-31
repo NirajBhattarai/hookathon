@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { formatUnits, maxUint256, type Address } from "viem";
-import { useAccount, useReadContracts, useWriteContract } from "wagmi";
+import { useAccount, useReadContracts } from "wagmi";
+import { useContractWrite } from "@/hooks/useContractWrite";
 import { useAppPublicClient } from "@/hooks/useAppPublicClient";
 import { useDeployment } from "@/hooks/useDeployment";
 import { FAUCET_TOKENS } from "@/lib/tokens";
@@ -37,7 +38,7 @@ export function AllowancesModal({ open, onClose }: { open: boolean; onClose: () 
   const { address } = useAccount();
   const { deployment } = useDeployment();
   const publicClient = useAppPublicClient(deployment);
-  const { writeContractAsync } = useWriteContract();
+  const { writeContractAsync } = useContractWrite();
   const [revokingAddr, setRevokingAddr] = useState<Address | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
 

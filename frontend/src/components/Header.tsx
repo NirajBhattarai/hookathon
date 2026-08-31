@@ -4,12 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const links = [
-  { href: "/", label: "Swap" },
-  { href: "/liquidity", label: "Liquidity" },
-  { href: "/portfolio", label: "Portfolio" },
-  { href: "/faucet", label: "Faucet" },
-  { href: "/docs", label: "Docs" },
-];
+  { href: "/", label: "Swap", prefetch: true },
+  { href: "/liquidity", label: "Liquidity", prefetch: false },
+  { href: "/portfolio", label: "Portfolio", prefetch: false },
+  { href: "/faucet", label: "Faucet", prefetch: false },
+  { href: "/docs", label: "Docs", prefetch: true },
+] as const;
 
 export function Header() {
   const pathname = usePathname();
@@ -25,7 +25,12 @@ export function Header() {
           const active =
             l.href === "/" ? pathname === "/" || pathname === "/swap" : pathname === l.href;
           return (
-            <Link key={l.href} href={l.href} className={active ? "nav-link active" : "nav-link"}>
+            <Link
+              key={l.href}
+              href={l.href}
+              prefetch={l.prefetch}
+              className={active ? "nav-link active" : "nav-link"}
+            >
               {l.label}
             </Link>
           );

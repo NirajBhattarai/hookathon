@@ -24,7 +24,7 @@ export function useBinLiquidity(pair?: PoolPairOverride) {
   const { book, preview, isLoading: bookLoading } = useBook(pair);
   const address = deployment?.binBook;
 
-  const MAX_LIQ_BINS = 200;
+  const MAX_LIQ_BINS = 48;
   const indexes = useMemo(() => {
     if (!book || preview) return [];
     const out: number[] = [];
