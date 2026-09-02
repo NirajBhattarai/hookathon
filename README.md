@@ -1,18 +1,44 @@
 # BinBook
 
-**A hook-owned, discretized liquidity book for Uniswap v4.**
+**A hook-owned, discretized liquidity book for Uniswap v4 that makes sandwich attacks structurally
+unprofitable — no private mempool, no relayer, no active LP required.**
+
+## Problem
+
+Constant-product AMMs (`x·y=k`) spread liquidity evenly across the entire price curve, so depth at
+the active price is no thicker than depth far from it. That makes price impact — and sandwich
+profitability — scale almost linearly with trade size: on a flat curve, a front-run → victim →
+back-run sequence nets an attacker **+24.81% ROI** at a 10%-of-TVL clip, and still **+1.34%** at a
+retail-sized 0.5% clip, deterministically, on every thin or new pool.
+
+Meme-coin launches are the worst case. In the first minutes a token trades there's no active LP
+reshaping ranges, so even Uniswap v3/v4-style concentrated liquidity offers no protection unless
+someone is manually managing it — and nobody is, for a brand-new pool.
+
+## Solution
+
+BinBook is a Uniswap v4 hook that bakes concentration into the AMM itself instead of relying on an
+LP to shape it. Liquidity is bucketed into fixed-width **bins** around the active price, sized by
+a **linear-decay ramp** (more liquidity near the current price, tapering toward the edges —
+similar in spirit to Trader Joe's Liquidity Book, built on v4's hook architecture) — automatic, no
+manual range management. The hook itself owns every position; users deposit tokens and the hook
+distributes them across bins on their behalf, tracking per-user, per-bin balances plus a
+pool-wide, price-aware share accounting layer for fair proportional ownership.
+
+Because depth decays sharply away from spot, an attacker's own front-run consumes disproportionate
+liquidity and fee before the victim even trades, and the back-run re-crosses *more* depth (paying
+the fee again) than the front-run saved going in — collapsing the same attack to **+2.78% ROI** at
+10% TVL and to a **-0.44% loss** at 0.5% (see
+[Performance](#performance-why-bins-beat-xyk-for-a-meme-launch) below for the full sweep, verified
+against 214 Foundry tests).
+
+It's also a strict generalization of Uniswap V2, not a rival curve to trust: v4 sees BinBook as a
+single LP (no new pricing model, no forked core to audit), and at full book width the ramp
+mathematically reduces to plain `x·y=k`.
 
 📒 An animated architecture walkthrough with live sandwich-resistance data lives at **`/docs`** in
 the frontend app — run it locally (`cd frontend && npm install && npm run dev`, then visit
 [localhost:3000/docs](http://localhost:3000/docs)) or on wherever you deploy it.
-
-BinBook replaces v4's native tick-range positions with a simpler model: liquidity is bucketed
-into fixed-width **bins** around the active price, sized by a **linear-decay** ramp (more
-liquidity near the current price, tapering out toward the edges — similar in spirit to Trader
-Joe's Liquidity Book, built on v4's hook architecture). The hook itself owns every position;
-users deposit tokens and the hook distributes them across bins on their behalf, tracking
-per-user, per-bin balances plus a pool-wide, price-aware share accounting layer for fair
-proportional ownership.
 
 This repo has two halves:
 
